@@ -257,8 +257,11 @@ namespace Retail::Db2::wdc5
             return Fail(error, "WDC5: physical field count does not match the compiled schema");
         if (header.sectionCount == 0 && header.recordCount != 0)
             return Fail(error, "WDC5: records exist but the section table is empty");
-        if ((header.flags & kFlagSparse) != 0)
-            return Fail(error, "WDC5: sparse tables are not supported by this compatibility layer");
+        const bool sparse = (header.flags & kFlagSparse) != 0;
+        // Sparse tables (ItemSparse) keep variable-length records located through an offset map and
+        // identify them through the non-inline id list.
+        if (sparse && (header.flags & kFlagNonInlineId) == 0)
+            return Fail(error, "WDC5: sparse tables without a non-inline id list are not supported");
 
         fieldOffsets_.resize(header.fieldCount + 1);
         for (size_t i = 0; i < header.fieldCount; ++i)
@@ -323,6 +326,67 @@ namespace Retail::Db2::wdc5
         for (const SectionHeader& section : sections)
         {
             if (!cursor.Seek(section.fileOffset)) return Fail(error, "WDC5: section offset is outside the file");
+            if (sparse)
+            {
+                // [records][id list][copy table][offset map][relationship data][offset-map id list]
+                if (section.offsetRecordsEnd < section.fileOffset || !cursor.Seek(section.offsetRecordsEnd))
+                    return Fail(error, "WDC5: sparse record block is outside the file");
+                std::vector<uint32_t> ids;
+                if ((section.idListSize & 3u) != 0 || !cursor.ReadArray(ids, section.idListSize / 4u) ||
+                    ids.size() != section.offsetMapIdCount)
+                    return Fail(error, "WDC5: sparse id list does not match the offset map");
+                for (uint32_t i = 0; i < section.copyTableCount; ++i)
+                {
+                    uint32_t destination = 0, source = 0;
+                    if (!cursor.Read(destination) || !cursor.Read(source))
+                        return Fail(error, "WDC5: truncated copy table");
+                    if (destination != source) copies[destination] = source;
+                }
+                std::vector<SparseEntry> map;
+                if (!cursor.ReadArray(map, section.offsetMapIdCount))
+                    return Fail(error, "WDC5: truncated sparse offset map");
+                if (section.tactKeyLookup != 0 && std::all_of(map.begin(), map.end(),
+                        [](const SparseEntry& entry) { return entry.size == 0; }))
+                    continue; // encrypted for a key we lack
+                for (uint32_t i = 0; i < map.size(); ++i)
+                {
+                    const SparseEntry& entry = map[i];
+                    if (entry.size == 0) continue;
+                    if (entry.offset > size || entry.size > size - entry.offset)
+                        return Fail(error, "WDC5: sparse record is outside the file");
+                    const uint8_t* data = cursor.Data() + entry.offset;
+                    const uint8_t* const end = data + entry.size;
+                    Row row;
+                    row.id = ids[i];
+                    row.values.resize(fieldOffsets_.back());
+                    for (size_t fieldIndex = 0; fieldIndex < header.fieldCount; ++fieldIndex)
+                    {
+                        uint32_t* values = row.values.data() + fieldOffsets_[fieldIndex];
+                        const uint16_t elements = std::max<uint16_t>(1, shapes[fieldIndex].elements);
+                        if (shapes[fieldIndex].text)
+                        {
+                            std::string text;
+                            while (data < end && *data) text.push_back(char(*data++));
+                            if (data >= end) return Fail(error, "WDC5: unterminated sparse string");
+                            ++data;
+                            row.text.push_back(std::move(text));
+                            continue;
+                        }
+                        const uint32_t bytesPerElement = columnMeta[fieldIndex].sizeBits / 8u / elements;
+                        if (bytesPerElement == 0 || bytesPerElement > 4 || size_t(end - data) < size_t(bytesPerElement) * elements)
+                            return Fail(error, "WDC5: sparse field does not match the compiled schema");
+                        for (uint16_t element = 0; element < elements; ++element)
+                        {
+                            uint32_t value = 0;
+                            std::memcpy(&value, data, bytesPerElement);
+                            data += bytesPerElement;
+                            values[element] = value;
+                        }
+                    }
+                    rows_.push_back(std::move(row));
+                }
+                continue;
+            }
             const size_t recordBytes = static_cast<size_t>(section.recordCount) * header.recordSize;
             if (header.recordSize && recordBytes / header.recordSize != section.recordCount)
                 return Fail(error, "WDC5: record byte count overflow");
@@ -557,6 +621,16 @@ namespace Retail::Db2
 
     bool Table::Load(const Definition& definition, std::string* error)
     {
+        return LoadFrom(definition, nullptr, error);
+    }
+
+    bool Table::LoadBytes(const Definition& definition, const std::vector<uint8_t>& bytes, std::string* error)
+    {
+        return LoadFrom(definition, &bytes, error);
+    }
+
+    bool Table::LoadFrom(const Definition& definition, const std::vector<uint8_t>* preloaded, std::string* error)
+    {
         name_.clear();
         filename_.clear();
         fields_.clear();
@@ -597,10 +671,11 @@ namespace Retail::Db2
                 return Fail(error, "DB2: " + std::string(definition.name) + " has an empty or duplicate relation name");
         }
 
-        std::vector<uint8_t> bytes;
+        std::vector<uint8_t> loaded;
         std::string readError;
-        if (!ReadWholeFile(definition.filename, bytes, readError))
+        if (!preloaded && !ReadWholeFile(definition.filename, loaded, readError))
             return Fail(error, "DB2: unable to read " + std::string(definition.filename) + ": " + readError);
+        const std::vector<uint8_t>& bytes = preloaded ? *preloaded : loaded;
         if (!table_.Load(bytes.data(), bytes.size(), shapes, definition.layoutHash, error)) return false;
 
         name_.assign(definition.name);

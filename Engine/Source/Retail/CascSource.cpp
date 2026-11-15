@@ -216,10 +216,12 @@ struct CascSource::Impl {
     }
 
     bool Fetch(const Reference& ref, const std::string& internal, std::vector<uint8_t>& bytes, std::string& error, bool lenient = false) {
-        if (configured && ref.id && !build.empty() && !lenient)
+        if (configured && ref.id && !build.empty())
         {
+            // Strict originals live beside the locale; lenient DB2 tables (zero-filled encrypted sections) are
+            // packed under tables\ so the two never answer for each other.
             const auto name = "EsteriaRetail\\" + product + "-" + build + "\\" + std::to_string(locale)
-                + "\\" + std::to_string(ref.id) + ".bin";
+                + "\\" + (lenient ? "tables\\" : "") + std::to_string(ref.id) + ".bin";
             const int packed = ReadPacked(name.c_str(), bytes, error, nullptr);
             if (packed < 0)
                 return false;

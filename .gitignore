@@ -421,3 +421,8 @@ ForeverCache/
 ForeverDecoded/
 CdnCache/
 __pycache__/
+
+# Local Retail sync settings and the durable CDN cache (may hold DB credentials / many GB)
+/Cache/
+/cdn_config.json
+/sync_config.json

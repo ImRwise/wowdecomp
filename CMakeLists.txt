@@ -16,6 +16,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 include(cmake/ExtendedLimits.cmake)
 
 option(WOWDECOMP_RETAIL_ASSETS "Read Retail assets from local CASC or Blizzard's CDN" OFF)
+include(CMakeDependentOption)
+# Native Retail armor: variant/display lookup, 3D armor geosets, layered textures and cloth physics.
+cmake_dependent_option(WOWDECOMP_RETAIL_ARMOR_PHYSICS "Native Retail armor, armor textures and armor physics" ON "WOWDECOMP_RETAIL_ASSETS" OFF)
 if (WOWDECOMP_RETAIL_ASSETS)
     include(cmake/RetailAssets.cmake)
 endif ()

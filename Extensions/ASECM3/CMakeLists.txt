@@ -3,9 +3,18 @@ if (CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     project(ASECM3 LANGUAGES CXX)
 endif ()
 
+# Hash text inputs with line endings normalised to LF: a Windows checkout (core.autocrlf) turns the committed LF
+# bytes into CRLF, which changed every SHA256 and made the generated metadata look stale. The generators do the same.
+function(asec_m3_text_sha256 path out)
+    file(READ "${path}" asec_text)
+    string(REPLACE "\r\n" "\n" asec_text "${asec_text}")
+    string(SHA256 asec_hash "${asec_text}")
+    set(${out} "${asec_hash}" PARENT_SCOPE)
+endfunction ()
+
 # Keep the copied research inputs and generated native metadata synchronized.
 foreach (ASEC_M3_INPUT animation_data.csv animation_id_overrides.json hots_animation_contexts.json)
-    file(SHA256 "${CMAKE_CURRENT_SOURCE_DIR}/data/${ASEC_M3_INPUT}" ASEC_M3_INPUT_HASH)
+    asec_m3_text_sha256("${CMAKE_CURRENT_SOURCE_DIR}/data/${ASEC_M3_INPUT}" ASEC_M3_INPUT_HASH)
     file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/src/Semantics.generated.inc" ASEC_M3_SEMANTIC_HASH REGEX "^// Input SHA256: ${ASEC_M3_INPUT} ")
     if (NOT ASEC_M3_SEMANTIC_HASH STREQUAL "// Input SHA256: ${ASEC_M3_INPUT} ${ASEC_M3_INPUT_HASH}")
         message(FATAL_ERROR "M3 semantic metadata is stale; run Modules/ASECM3/tools/generate_semantics.py")
@@ -13,14 +22,14 @@ foreach (ASEC_M3_INPUT animation_data.csv animation_id_overrides.json hots_anima
 endforeach ()
 
 # A checked-in metadata table keeps Python out of installation/runtime.
-file(SHA256 "${CMAKE_CURRENT_SOURCE_DIR}/schema/structures.xml" ASEC_M3_SCHEMA_HASH)
+asec_m3_text_sha256("${CMAKE_CURRENT_SOURCE_DIR}/schema/structures.xml" ASEC_M3_SCHEMA_HASH)
 file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/src/Schema.generated.inc" ASEC_M3_GENERATED_HASH REGEX "^// Schema SHA256: ")
 if (NOT ASEC_M3_GENERATED_HASH STREQUAL "// Schema SHA256: ${ASEC_M3_SCHEMA_HASH}")
     message(FATAL_ERROR "M3 schema metadata is stale; run Modules/ASECM3/tools/generate_schema.py")
 endif ()
 
 # Portable parser/data core. Engine integration lives in a separate adapter.
-file(SHA256 "${CMAKE_CURRENT_SOURCE_DIR}/data/madd_shader_inputs.json" ASEC_M3_BUFFER_HASH)
+asec_m3_text_sha256("${CMAKE_CURRENT_SOURCE_DIR}/data/madd_shader_inputs.json" ASEC_M3_BUFFER_HASH)
 file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/src/BufferInputs.generated.inc" ASEC_M3_BUFFER_GENERATED_HASH REGEX "^// Input SHA256: madd_shader_inputs.json ")
 if (NOT ASEC_M3_BUFFER_GENERATED_HASH STREQUAL "// Input SHA256: madd_shader_inputs.json ${ASEC_M3_BUFFER_HASH}")
     message(FATAL_ERROR "M3 buffer input metadata is stale; run Modules/ASECM3/tools/generate_buffer_inputs.py")
@@ -62,7 +71,7 @@ target_compile_features(ASECM3Core PUBLIC cxx_std_17)
 # Engine adapter remains a separate object library from the portable data core.
 # It is not registered as a model frame until the draw path is implemented.
 if (WIN32 AND TARGET Gx)
-    file(SHA256 "${CMAKE_CURRENT_SOURCE_DIR}/shaders/StandardSurface.hlsl" ASEC_M3_SURFACE_HASH)
+    asec_m3_text_sha256("${CMAKE_CURRENT_SOURCE_DIR}/shaders/StandardSurface.hlsl" ASEC_M3_SURFACE_HASH)
     file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/client/SurfaceShaders.generated.inc" ASEC_M3_SURFACE_GENERATED_HASH REGEX "^// HLSL SHA256: ")
     if (NOT ASEC_M3_SURFACE_GENERATED_HASH STREQUAL "// HLSL SHA256: ${ASEC_M3_SURFACE_HASH}")
         message(FATAL_ERROR "M3 surface bytecode is stale; run Modules/ASECM3/tools/generate_surface_shader.py")

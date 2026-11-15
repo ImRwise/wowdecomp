@@ -62,6 +62,9 @@ struct SkinParentBinding {
     const M2Data* childData;
     const M2Data* parentData;
     std::vector<uint16_t> bones;
+    // Standalone attachment rigs (belts) model the piece around the origin; the body joint's pivot moves it to where it is worn.
+    bool lift = false;
+    C3Vector liftBy;
 };
 std::mutex s_skinParentMutex;
 std::map<const CM2Model*, SkinParentBinding> s_skinParents;
@@ -127,6 +130,8 @@ void CopySkinParentPose(CM2Model* child) {
     // never alias: both model instances own and free their own matrix allocation.
     for (size_t i = 0; i < binding.bones.size(); ++i)
         child->m_boneMatrices[i] = parent->m_boneMatrices[binding.bones[i]];
+    if (binding.lift)
+        for (size_t i = 0; i < binding.bones.size(); ++i) child->m_boneMatrices[i].Translate(binding.liftBy);
     child->m_matrixF4 = parent->m_matrixF4;
     child->m_scaleSq = parent->m_scaleSq;
 }
@@ -6196,10 +6201,6 @@ void CM2Model::Animate() {
             transform = &matrix;
         }
 
-        // Explicit bone mounts must also survive synchronous preview animation, including private root sockets.
-        matrix = *transform;
-        ApplyAttachmentFrame(this, parent, matrix);
-        transform = &matrix;
         parent = this->m_attachParent;
 
         if (this->m_fFlags & 0x1000) {
@@ -6562,8 +6563,24 @@ bool CM2Model::SetSkinParent(CM2Model* parent) {
             const uint32_t name = parentBones[i].m_boneNameCRC;
             if (name && !names.emplace(name, uint16_t(i)).second) return false;
         }
+        // A small standalone attachment rig (a belt: three bones named for the item, none of them in the body's skeleton) has no
+        // joint to match by name. Its vertices are in body bind space, so bind every bone to the body's lower-spine joint (key
+        // bone 4) rather than leave the piece unbound and invisible.
+        bool anyNamed = false;
+        for (uint32_t i = 0; i < childBones.m_count; ++i) anyNamed = anyNamed || names.count(childBones[i].m_boneNameCRC);
+        if (!anyNamed) {
+            uint16_t anchor = 0xffff;
+            for (uint32_t i = 0; i < parentBones.m_count && anchor == 0xffff; ++i)
+                if (parentBones[i].m_boneId == 4) anchor = uint16_t(i);
+            if (anchor == 0xffff) return false;
+            std::fill(binding.bones.begin(), binding.bones.end(), anchor);
+            binding.lift = true;
+            // Trim measured against belts that ship on the full body rig (their buckle sits 0.03 further forward, and the belt line reads
+            // a little low on the body): forward +x, down -z in model space.
+            binding.liftBy = C3Vector(parentBones[anchor].m_pivot.x + 0.03f, parentBones[anchor].m_pivot.y, parentBones[anchor].m_pivot.z - 0.04f);
+        }
         std::map<uint32_t, uint16_t> childNames;
-        for (uint32_t i = 0; i < childBones.m_count; ++i) {
+        for (uint32_t i = 0; anyNamed && i < childBones.m_count; ++i) {
             const auto& bone = childBones[i];
             if (!bone.m_boneNameCRC || !childNames.emplace(bone.m_boneNameCRC, uint16_t(i)).second) return false;
             const auto match = names.find(bone.m_boneNameCRC);
@@ -6581,6 +6598,7 @@ bool CM2Model::SetSkinParent(CM2Model* parent) {
         // use its pivots and include the omitted joints, rather than re-evaluate the child rig.
         if (ancestor != 0xffff) {
             const uint16_t expected = binding.bones[ancestor];
+            if (binding.bones[i] == expected) continue;   // bound to the same body joint as its parent
             uint16_t actual = parentBones[binding.bones[i]].m_parentIndex;
             uint32_t depth = 0;
             while (actual != expected && actual != 0xffff && depth++ < parentBones.m_count)
@@ -8307,19 +8325,9 @@ bool CM2Model::CopyAttachmentFrameFrom(const CM2Model* source) {
     return this->SetAttachmentFrame(frame.bone, frame.position, frame.scale);
 }
 
-bool CM2Model::HasAttachmentFrame() const {
-    std::lock_guard<std::mutex> lock(s_skinParentMutex);
-    const auto found = s_attachmentFrames.find(this);
-    if (found == s_attachmentFrames.end()) return false;
-    const auto& frame = found->second;
-    return this->m_attachParent == frame.parent && this->m_shared == frame.childShared &&
-        frame.parent->m_shared && frame.parent->m_shared->m_data == frame.parentData &&
-        frame.bone < frame.parentData->m_bones.m_count;
-}
-
 bool CM2Model::SetAttachmentFrame(uint32_t bone, const C3Vector& position, float scale) {
     CM2Model* parent = this->m_attachParent;
-    if (!parent || !(parent->m_fFlags & 1) || (this->m_attachmentIndex == 0xffff && !(this->m_fFlags & 0x40000)) ||
+    if (!parent || !(parent->m_fFlags & 1) || this->m_attachmentIndex == 0xffff ||
         !this->m_shared || !parent->m_shared || !parent->m_shared->m_data ||
         bone >= parent->m_shared->m_data->m_bones.m_count ||
         !std::isfinite(position.x) || !std::isfinite(position.y) || !std::isfinite(position.z) ||

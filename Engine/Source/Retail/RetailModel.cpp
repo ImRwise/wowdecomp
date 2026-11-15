@@ -203,9 +203,15 @@ bool Particles(std::vector<uint8_t>& b, const ModelFiles& files, std::string& re
     constexpr size_t kRetail = 0x1ec, kLegacy = 0x1dc;
     if (!U32(b, 0x128)) return true;
     if (!Array(b, 0x128, kRetail)) return Fail(reason, "particle array exceeds payload");
-    // shortcut: tracks stored in external .anim files are not relocated for particles; such models keep none.
-    if (!files.animations.empty()) return Fail(reason, "particles with external animation files");
+    // Per-sequence track data that lives in an external .anim keeps its anim-relative offsets, exactly as for bones; the legacy
+    // loader reads it from the .anim. Such sequences cannot be inspected here, so the in-file rewrites below skip them
+    // (`external`), and an emitter whose gravity needs that rewrite is omitted rather than drawn with garbage gravity.
+    const auto external = [&](const size_t track, uint32_t sequence) {
+        return U16(b, track + 2) == 0xffff && sequence < U32(b, 0x1c) &&
+            !(U32(b, U32(b, 0x20) + size_t(sequence) * 64 + 12) & 0x20);
+    };
     std::vector<uint8_t> out;
+    uint32_t kept = 0;
     for (uint32_t i = 0; i < U32(b, 0x128); ++i) {
         const size_t p = U32(b, 0x12c) + size_t(i) * kRetail;
         for (size_t track : {0x34u, 0x48u, 0x5cu, 0x70u, 0x84u, 0x98u, 0xb0u, 0xc8u, 0xdcu, 0xf0u}) {
@@ -219,11 +225,17 @@ bool Particles(std::vector<uint8_t>& b, const ModelFiles& files, std::string& re
         if (!String(b, p + 0x18) || !String(b, p + 0x20) || !Array(b, p + 0x1c0, 12)) return Fail(reason, "invalid particle model name or spline");
 
         uint32_t flags = U32(b, p + 4);
+        if ((flags & 0x800000) && U16(b, p + 0x84 + 2) == 0xffff) {
+            bool inAnim = false;
+            for (uint32_t j = 0; j < U32(b, p + 0x84 + 12); ++j) inAnim |= external(p + 0x84, j);
+            if (inAnim) continue;   // compressed gravity stored in an .anim cannot be converted here
+        }
         // 0x800000: gravity keys are compressed vectors (int8 x, int8 y, int16 magnitude). The legacy emitter only
         // knows a downward scalar, so keep the vertical component (legacy g pulls along -z).
         if (flags & 0x800000) {
             const size_t g = p + 0x84;
             for (uint32_t j = 0; j < U32(b, g + 12); ++j) {
+                if (external(g, j)) continue;
                 const size_t pair = U32(b, g + 16) + size_t(j) * 8;
                 if (!Array(b, pair, U16(b, g) >= 2 ? 12 : 4)) continue;
                 const size_t stride = U16(b, g) >= 2 ? 12 : 4;
@@ -246,6 +258,7 @@ bool Particles(std::vector<uint8_t>& b, const ModelFiles& files, std::string& re
         {
             const size_t z = p + 0xf0;
             for (uint32_t j = 0; j < U32(b, z + 12); ++j) {
+                if (external(z, j)) continue;
                 const size_t pair = U32(b, z + 16) + size_t(j) * 8;
                 if (!Array(b, pair, 4)) continue;
                 for (uint32_t k = 0; k < U32(b, pair); ++k) {
@@ -265,8 +278,10 @@ bool Particles(std::vector<uint8_t>& b, const ModelFiles& files, std::string& re
         // Retail blend modes beyond the legacy particle set fall back to additive; emitter types to plane.
         if (out[o + 0x28] > 4) out[o + 0x28] = 4;
         if (out[o + 0x29] > 3) out[o + 0x29] = 1;
+        ++kept;
     }
     while (b.size() % 4) b.push_back(0);
+    Put(b, 0x128, kept);
     Put(b, 0x12c, uint32_t(b.size()));
     b.insert(b.end(), out.begin(), out.end());
     return true;
@@ -1210,6 +1225,41 @@ std::string HexWord(uint16_t v) {
     return text;
 }
 
+// True for a batch that draws additively and whose every texture is an environment-type (5) slot. Retail fills those at
+// runtime with a reflection cube and display info supplies only types 11-13, so nothing here gives the batch an image:
+// the sheen layer (Amberback Arboon's batch 6, shader 0x4011) would draw as a solid white additive shape.
+bool OnlyAdditiveEnvironmentTextures(const std::vector<uint8_t>& b, const std::vector<uint8_t>& m, size_t p) {
+    const uint32_t count = U16(b, p + 12), first = U16(b, p + 14), material = U16(b, p + 8);
+    if (!count || !Array(m, 0x50, 16) || !Array(m, 0x70, 4) || !Array(m, 0x80, 2) || !Index(m, 0x80, first, count) ||
+        !Index(m, 0x70, material, 1))
+        return false;
+    const uint16_t blend = U16(m, U32(m, 0x74) + size_t(material) * 4 + 2);
+    if (blend != 3 && blend != 4 && blend != 7) return false; // NoAlphaAdd, Add, BlendAdd
+    for (uint32_t k = 0; k < count; ++k) {
+        const uint16_t slot = U16(m, U32(m, 0x84) + size_t(first + k) * 2);
+        if (slot >= U32(m, 0x50) || U32(m, U32(m, 0x54) + size_t(slot) * 16) != 5) return false;
+    }
+    return true;
+}
+
+// The legacy two-texture combiners read their second texture from UV set 2, while Retail reads it from set 1 unless the
+// batch sets 0x4000. A glow layer can therefore use a legacy combiner only where set 2 is a real mapping: identical to set 1
+// on every vertex (the common case for armor trims and weapon cores), or authored (non-zero) on a batch that asks for it.
+bool GlowUvSetUsable(const std::vector<uint8_t>& m, bool secondSetRequested) {
+    if (!Array(m, 0x3c, 48)) return false;
+    const size_t base = U32(m, 0x40);
+    bool identical = true, authored = false;
+    for (uint32_t v = 0; v < U32(m, 0x3c); ++v) {
+        const size_t at = base + size_t(v) * 48 + 32;
+        for (size_t k = 0; k < 8; k += 4) {
+            const uint32_t first = U32(m, at + k), second = U32(m, at + 8 + k);
+            identical &= first == second;
+            authored |= second != 0;
+        }
+    }
+    return secondSetRequested ? authored : identical;
+}
+
 bool PrepareSkin(std::vector<uint8_t>& b, const std::vector<uint8_t>& m, std::string& error, bool degradeShaders) {
     if (!Range(b, 0, 48) || !Range(m, 0, 0x130) || !Array(b, 4, 2) || !Array(b, 28, 48) || !Array(m, 0x3c, 48))
         return Fail(error, "Invalid SKIN arrays");
@@ -1239,6 +1289,12 @@ bool PrepareSkin(std::vector<uint8_t>& b, const std::vector<uint8_t>& m, std::st
     for (uint32_t i = 0; i < U32(b, 36); ++i) {
         size_t p = U32(b, 40) + size_t(i) * 24 + 2;
         uint16_t shader = U16(b, p);
+        if (OnlyAdditiveEnvironmentTextures(b, m, p)) {
+            // shortcut: no reflection sheen on these models (about two dozen mounts); 0x8000 is the client's own disabled
+            // marker. Supply an environment texture to bring the layer back.
+            b[p] = 0; b[p + 1] = 0x80;
+            continue;
+        }
         // Retail reads both textures of a runtime two-texture shader from UV set 1 unless 0x4000 asks for set 2; the
         // legacy combiners read set 2, which is often all zeros (Thrayir's glow card drew as a flat square). When both
         // slots name the same texture, draw it once with the first op.
@@ -1272,6 +1328,12 @@ bool PrepareSkin(std::vector<uint8_t>& b, const std::vector<uint8_t>& m, std::st
             // with the Mod combiner (0x10), which keeps its alpha: the Opaque one drew the Mechacycle's additive headlight
             // beam (0x8006) as a solid panel. shortcut: no glow layer; write the additive combiners if an emissive piece
             // looks flat.
+            if (shader != 0x8012 && shader != 0x8017 && U16(b, p + 12) == 2 && GlowUvSetUsable(m, (shader & 0x4000) != 0)) {   // not the crossfade/lerp ones
+                // Two textures whose second UV set is usable: Mod_Add (base lit by the vertex colour, glow layer added) restores the
+                // emissive trim. shortcut: the glow's own alpha does not weight it (Retail's AddAlpha).
+                b[p] = 0x13; b[p + 1] = 0;
+                continue;
+            }
             b[p] = 0x10; b[p + 1] = 0;
             b[p + 12] = 1; b[p + 13] = 0;
         } else if (shader == 0x8015) {

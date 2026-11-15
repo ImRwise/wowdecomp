@@ -16,6 +16,7 @@
 #include "WoW/Source/WorldClient/DetailDoodad.h"
 #include "WoW/Source/WorldClient/GrassDensity.h"
 #include "WoW/Source/WorldClient/SurfaceCover.h"
+#include "WoW/Common/ComponentCore/RetailArmorPhysics.h"
 #include "WoW/Source/WorldClient/LivingWind.h"
 #include "Engine/Source/Os/Input.h"
 #include "Engine/Source/Os/System.h"
@@ -676,6 +677,7 @@ void ClientRegisterConsoleCommands() {
     LootBeam::RegisterCVars();
     TreeWind::RegisterCVars();
     LivingWind::RegisterCVars();
+    RetailArmorPhysics::RegisterCVars();
     CDetailDoodad::RegisterCVars();
     GrassDensity::RegisterCVars();
     SurfaceCover::RegisterCVars();

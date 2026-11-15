@@ -24,24 +24,43 @@ bool ValidRange(const std::vector<BYTE>& bytes, const BYTE* key)
     return !memcmp(hash, key, sizeof(hash));
 }
 
-DWORD DownloadRange(LPCTSTR remote, ULONGLONG offset, std::vector<BYTE>& bytes)
+// One WinINet session per thread: its connection pool keeps CDN sockets alive between ranges, so a
+// bulk pull does not pay a TCP/TLS handshake for every file. Each worker thread owns its own.
+struct ThreadSession
+{
+    HINTERNET handle = NULL;
+    ~ThreadSession() { if (handle) InternetCloseHandle(handle); }
+    HINTERNET Get()
+    {
+        if (!handle)
+        {
+            handle = InternetOpenA("EsteriaCasc/1", INTERNET_OPEN_TYPE_PRECONFIG, NULL, NULL, 0);
+            DWORD timeout = 30000;
+            for (DWORD option : {INTERNET_OPTION_CONNECT_TIMEOUT, INTERNET_OPTION_SEND_TIMEOUT, INTERNET_OPTION_RECEIVE_TIMEOUT})
+                InternetSetOptionA(handle, option, &timeout, sizeof(timeout));
+            DWORD connections = 8;
+            InternetSetOptionA(handle, INTERNET_OPTION_MAX_CONNS_PER_SERVER, &connections, sizeof(connections));
+        }
+        return handle;
+    }
+};
+
+DWORD DownloadRangeOnce(LPCTSTR remote, ULONGLONG offset, std::vector<BYTE>& bytes)
 {
     using InternetHandle = std::unique_ptr<void, decltype(&InternetCloseHandle)>;
-    InternetHandle session(InternetOpenA("EsteriaCasc/1", INTERNET_OPEN_TYPE_PRECONFIG, NULL, NULL, 0),
-        InternetCloseHandle);
-    if (!session)
+    thread_local ThreadSession pool;
+    HINTERNET shared = pool.Get();
+    if (!shared)
         return GetLastError();
-    DWORD timeout = 30000;
-    for (DWORD option : {INTERNET_OPTION_CONNECT_TIMEOUT, INTERNET_OPTION_SEND_TIMEOUT, INTERNET_OPTION_RECEIVE_TIMEOUT})
-        InternetSetOptionA(session.get(), option, &timeout, sizeof(timeout));
+    struct Borrowed { HINTERNET handle; } session{shared};
     std::string url(remote);
     if (url.find("://") == std::string::npos)
         url = "http://" + url;
     const auto end = offset + bytes.size() - 1;
     const auto headers = "Range: bytes=" + std::to_string(offset) + "-" + std::to_string(end)
         + "\r\nAccept-Encoding: identity\r\n";
-    InternetHandle request(InternetOpenUrlA(session.get(), url.c_str(), headers.c_str(), DWORD(headers.size()),
-        INTERNET_FLAG_RELOAD | INTERNET_FLAG_NO_CACHE_WRITE | INTERNET_FLAG_NO_UI, 0), InternetCloseHandle);
+    InternetHandle request(InternetOpenUrlA(session.handle, url.c_str(), headers.c_str(), DWORD(headers.size()),
+        INTERNET_FLAG_RELOAD | INTERNET_FLAG_NO_CACHE_WRITE | INTERNET_FLAG_NO_UI | INTERNET_FLAG_KEEP_CONNECTION, 0), InternetCloseHandle);
     if (!request)
         return GetLastError();
     DWORD status = 0, length = sizeof(status);
@@ -72,6 +91,22 @@ DWORD DownloadRange(LPCTSTR remote, ULONGLONG offset, std::vector<BYTE>& bytes)
         done += read;
     }
     return ERROR_SUCCESS;
+}
+
+// Transient failures (resets, 5xx, short reads) are retried with exponential backoff before the
+// caller falls through to the next CDN server.
+DWORD DownloadRange(LPCTSTR remote, ULONGLONG offset, std::vector<BYTE>& bytes)
+{
+    DWORD result = ERROR_SUCCESS;
+    for (int attempt = 0; attempt < 3; ++attempt)
+    {
+        if (attempt)
+            Sleep(250u << (2 * (attempt - 1))); // 250 ms, 1 s
+        result = DownloadRangeOnce(remote, offset, bytes);
+        if (result == ERROR_SUCCESS || result == ERROR_FILE_NOT_FOUND)
+            break;
+    }
+    return result;
 }
 
 DWORD SaveRange(LPCTSTR path, std::vector<BYTE>& bytes)

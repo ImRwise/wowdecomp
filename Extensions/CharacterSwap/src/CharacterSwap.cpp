@@ -3,6 +3,7 @@
 #include "Engine/Source/lua-5.1/src/lauxlib.h"
 #include "Engine/Source/Os/TimeManager.h"
 #include "Engine/Source/Services/AsyncFile.h"
+#include "WoW/Common/ComponentCore/RetailArmorPhysics.h"
 #include "WoW/Source/DB/DBClient/DBClient.h"
 #include "WoW/Source/Extension/ExtensionMgr.h"
 #include "WoW/Source/Glue/CharacterSelection.h"
@@ -359,6 +360,7 @@ public:
 
     void OnLogoutComplete() override {
         s_leftWorld = true;
+        RetailArmorPhysics::ForgetAll();   // the old character's models are gone: drop every physics state, touch nothing
         Mark("logged out, tearing the world down");
     }
     void OnMapLoaded(uint32_t, char const*) override { Mark("map loaded (login is sent next)"); }

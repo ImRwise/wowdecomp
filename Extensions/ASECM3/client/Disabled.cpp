@@ -34,9 +34,6 @@ void RegisterWorldEffectScriptFunctions(){}
 void RegisterDBCModelScriptFunctions(){}
 void RegisterPlayerModelScriptFunctions(){}
 const char* PlayerModelOverride(){return nullptr;}
-bool SetUnitEffectSequence(CGUnit_C*,int32_t,std::string&){return false;}
-void RegisterWorldEffectScriptFunctions(){}
-void RegisterDBCModelScriptFunctions(){}
 UnitWorldInfo GetUnitWorldInfo(const CGUnit_C*){return {};}
 std::shared_ptr<const NativeAttachmentSnapshot> CaptureModelAttachments(const CM2Model*){return {};}
 NativeAttachment SnapshotAttachment(const NativeAttachmentSnapshot&,uint32_t id,bool){NativeAttachment out;out.id=id;out.local.Identity();out.pivot=C3Vector(0,0,0);return out;}

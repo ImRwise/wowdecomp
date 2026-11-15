@@ -3,6 +3,7 @@
 // addresses the donor read are the native World::Intersect, CMap::QueryAreaId, s_weather, g_clientGameTime and
 // DayNight::GetInfo here.
 #include "WoW/Source/WorldClient/LivingWind.h"
+#include "WoW/Common/ComponentCore/RetailArmorPhysics.h"
 
 #include <cmath>
 #include <cstdio>
@@ -472,7 +473,26 @@ float AirTemperature(const ClimateRow& row, bool withWeather = true) {
 
 }  // namespace
 
+#if defined(WOWDECOMP_RETAIL_ASSETS) && defined(WOWDECOMP_RETAIL_ARMOR_PHYSICS)
+// Wind for Retail armor physics: the steady wind with travelling gusts, already cut by roofs (shelter) and walls
+// (lee shadow) by StrengthAt. 1.0 of strength is about 14 yd/s of air; gusts take it above that.
+static bool ArmorWind(const float position[3], float out[3]) {
+    if (!LivingWind::Active()) return false;
+    const float strength = LivingWind::StrengthAt(position);
+    if (!(strength > 0.0f)) return false;
+    const float rad = LivingWind::BearingDegrees() * kPi / 180.0f;
+    const float speed = strength * 14.0f;
+    out[0] = std::cos(rad) * speed;    // bearing 0 blows toward +X (north), 90 toward -Y (east)
+    out[1] = -std::sin(rad) * speed;
+    out[2] = 0.0f;
+    return true;
+}
+#endif
+
 void LivingWind::RegisterCVars() {
+#if defined(WOWDECOMP_RETAIL_ASSETS) && defined(WOWDECOMP_RETAIL_ARMOR_PHYSICS)
+    RetailArmorPhysics::SetWindProvider(&ArmorWind);
+#endif
     s_enabled = OptionCVars::Register("worldWind", "World wind from WindProfile.cdbc moves the trees and the grass", "1");
     s_strength = OptionCVars::Register("worldWindStrength", "World wind: multiplier on every place's wind (1 = as the table says)", "1");
     s_shelter = OptionCVars::Register("worldWindShelter", "World wind: roofs and overhangs keep the ground below calm", "1");

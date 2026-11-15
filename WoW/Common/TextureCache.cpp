@@ -95,11 +95,19 @@ void* TextureCacheCopyTexture(void* handle) {
 void* TextureCacheGetMip(void* handle, uint32_t mipLevel) {
     CACHEENTRY* entry = static_cast<CACHEENTRY*>(handle);
 
-    if (!entry || entry->m_loadFailed || !entry->m_data || mipLevel >= entry->m_info.m_mipCount) {
+    if (!entry || entry->m_loadFailed || !entry->m_data || mipLevel >= entry->m_info.m_mipCount || mipLevel >= 16) {
         return nullptr;
     }
 
-    return reinterpret_cast<uint8_t*>(entry->m_data) + entry->m_data->m_mipOffsets[mipLevel];
+    // A BLP can store fewer mips than the full chain (or a bad table): never hand out a pointer outside the file.
+    const uint32_t offset = entry->m_data->m_mipOffsets[mipLevel];
+    const uint32_t size = entry->m_data->m_mipSizes[mipLevel];
+
+    if (offset >= entry->m_size || (size && static_cast<uint64_t>(offset) + size > entry->m_size)) {
+        return nullptr;
+    }
+
+    return reinterpret_cast<uint8_t*>(entry->m_data) + offset;
 }
 
 // VERIFY: 0bb1b277 manual
@@ -112,6 +120,25 @@ BlpPalPixel* TextureCacheGetPal(void* handle) {
     }
 
     return entry->m_data->m_extended.m_palette;
+}
+
+bool TextureCacheGetFile(void* handle, const uint8_t*& data, uint32_t& size) {
+    CACHEENTRY* entry = static_cast<CACHEENTRY*>(handle);
+
+    if (!entry || entry->m_loadFailed || !entry->m_data || entry->m_asyncObject || !entry->m_info.m_width) {
+        return false;
+    }
+
+    data = reinterpret_cast<const uint8_t*>(entry->m_data);
+    size = entry->m_size;
+
+    return true;
+}
+
+const char* TextureCacheGetName(void* handle) {
+    const CACHEENTRY* entry = static_cast<const CACHEENTRY*>(handle);
+
+    return entry ? entry->m_fileName : nullptr;
 }
 
 // VERIFY: 8b89ff06 manual

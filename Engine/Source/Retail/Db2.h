@@ -124,6 +124,8 @@ namespace Retail::Db2
     {
     public:
         bool Load(const Definition& definition, std::string* error = nullptr);
+        // Same as Load, for bytes the caller already fetched (CDN tables, fixtures).
+        bool LoadBytes(const Definition& definition, const std::vector<uint8_t>& bytes, std::string* error = nullptr);
 
         const wdc5::Row* Find(uint32_t id) const noexcept { return table_.Find(id); }
         const std::vector<wdc5::Row>& Rows() const noexcept { return table_.Rows(); }
@@ -146,6 +148,7 @@ namespace Retail::Db2
         const std::string& EmbeddedSchema() const noexcept { return table_.Schema(); }
 
     private:
+        bool LoadFrom(const Definition& definition, const std::vector<uint8_t>* preloaded, std::string* error);
         struct RelationBinding
         {
             RelationSource source = RelationSource::Field;

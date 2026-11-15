@@ -1,6 +1,8 @@
 #include "Engine/Source/Retail/RetailLookWire.h"
 #include "Engine/Source/Retail/BodyShape.h"
 #include "WoW/Common/ComponentCore/RetailRace.h"
+#include "WoW/Common/ComponentCore/RetailArmorPhysics.h"
+#include "Engine/Source/Os/TimeManager.h"
 #include "WoW/Common/ComponentCore/UprightUndead.h"
 
 #if defined(WOWDECOMP_RETAIL_ASSETS)
@@ -23,6 +25,10 @@
 #include "Engine/Source/Model2/M2Model.h"
 #include "Engine/Source/Model2/M2Scene.h"
 #include "Engine/Source/Retail/Appearance.h"
+#if defined(WOWDECOMP_RETAIL_ARMOR_PHYSICS)
+#include "Engine/Source/Retail/ArmorDb.h"
+#include "Engine/Source/Retail/ArmorPath.h"
+#endif
 #include "Engine/Source/Retail/BusyNotice.h"
 #include "Engine/Source/Retail/CascSource.h"
 #include "Engine/Source/Retail/Compose.h"
@@ -463,8 +469,64 @@ constexpr uint32_t CollectionSocket = UINT32_MAX - 1;
 struct CollectionState {
     CM2Model* parent = nullptr;
     std::map<std::string, std::vector<uint16_t>> geosets;
+    // Retail armor parts only: collection name -> the M2 texture type and "retail/<id>.blp" path of each replaceable layer.
+    std::map<std::string, std::vector<std::pair<uint32_t, std::string>>> armorTextures;
 };
 std::unordered_map<CCharacterComponent*, CollectionState> g_collections;
+// Value in a collection's geoset list meaning "every geoset except the unconditional group 0".
+constexpr uint16_t kAllGeosets = 0xFFFF;
+// Retail ships one armor model for a whole set: the same file is named by the legs, the boots, the gloves and the belt, and
+// it holds a geoset group (id / 100) for each of those slots. A piece may only show the groups of its own slot, or wearing
+// the greaves alone would also draw the boots, gauntlets and belt. A list entry kGroupFlag | g shows group g; kUnclaimedGeosets
+// shows every group no slot owns (decoration the slot table does not know about).
+constexpr uint16_t kGroupFlag = 0x8000;
+constexpr uint16_t kUnclaimedGeosets = 0xFFFE;
+
+// Geoset groups each equipment slot owns: 4 gloves, 23 hand attachments, 5 boots, 20 feet, 8 wristbands/sleeves, 9 kneepads,
+// 11 pants, 13 trousers/robe skirt, 10 chest, 22 torso, 12 tabard, 15 cape, 18 belt.
+const std::vector<uint16_t>& SlotGeosetGroups(ITEM_SLOT slot) {
+    static const std::vector<uint16_t> none;
+    static const std::vector<uint16_t> gloves{4, 23}, boots{5, 20}, bracers{8}, pants{9, 11, 13}, chest{8, 10, 13, 22},
+                                       tabard{12}, cape{15}, belt{18}, shirt{10, 22};
+    switch (slot) {
+        case ITEMSLOT_GLOVES: return gloves;
+        case ITEMSLOT_BOOTS: return boots;
+        case ITEMSLOT_BRACERS: return bracers;
+        case ITEMSLOT_PANTS: return pants;
+        case ITEMSLOT_CHEST: return chest;
+        case ITEMSLOT_TABARD: return tabard;
+        case ITEMSLOT_CAPE: return cape;
+        case ITEMSLOT_BELT: return belt;
+        case ITEMSLOT_SHIRT: return shirt;
+        default: return none;
+    }
+}
+
+bool GroupClaimed(uint32_t group) {
+    static const ITEM_SLOT slots[] = {ITEMSLOT_GLOVES, ITEMSLOT_BOOTS, ITEMSLOT_BRACERS, ITEMSLOT_PANTS, ITEMSLOT_CHEST,
+                                      ITEMSLOT_TABARD, ITEMSLOT_CAPE, ITEMSLOT_BELT, ITEMSLOT_SHIRT};
+    for (const ITEM_SLOT slot : slots)
+        for (const uint16_t owned : SlotGeosetGroups(slot))
+            if (owned == group) return true;
+    return false;
+}
+
+void ShowGeosetEntry(CM2Model* child, uint16_t entry) {
+    // Geoset id 0 is a part's own base mesh (a belt's whole body is id 0 with only its buckle in group 18); the range calls
+    // below start at 1, so without this such a piece loaded invisible.
+    child->SetGeometryVisible(0, 0, 1);
+    if (entry == kAllGeosets) {
+        child->SetGeometryVisible(1, 65534, 1);
+    } else if (entry == kUnclaimedGeosets) {
+        for (uint32_t group = 1; group <= 99; ++group)
+            if (!GroupClaimed(group)) child->SetGeometryVisible(group * 100 + 1, group * 100 + 99, 1);
+    } else if (entry & kGroupFlag) {
+        const uint32_t group = entry & 0x7FFFu;
+        child->SetGeometryVisible(group * 100 + 1, group * 100 + 99, 1);
+    } else {
+        child->SetGeometryVisible(entry, entry, 1);
+    }
+}
 
 std::string CollectionName(CM2Model* model) {
     std::string name = model->m_shared->m_fileName;
@@ -472,13 +534,20 @@ std::string CollectionName(CM2Model* model) {
     return name;
 }
 
+// Texture types a Retail armor part gets from its own item display (collection name -> types). The body's slots must not
+// overwrite them: BindCollectionTextures runs after the part is created and would replace them with the body's texture.
+std::map<std::string, std::set<uint32_t>> g_armorTextureTypes;
+
 void BindCollectionTextures(CM2Model* parent) {
     if (!(parent->m_fFlags & 1) || !parent->m_textures) return;
     const auto& textures = parent->m_shared->m_data->m_textures;
     for (CM2Model* child = parent->m_attachList; child; child = child->m_attachNext) {
         if (child->m_attachmentId != CollectionSocket) continue;
-        for (uint32_t i = 0; i < textures.m_count; ++i)
+        const auto own = g_armorTextureTypes.find(CollectionName(child));
+        for (uint32_t i = 0; i < textures.m_count; ++i) {
+            if (own != g_armorTextureTypes.end() && own->second.count(textures[i].m_type)) continue;
             if (textures[i].m_type && parent->m_textures[i]) child->ReplaceTexture(textures[i].m_type, parent->m_textures[i]);
+        }
     }
 }
 
@@ -538,7 +607,7 @@ void FinishCollections(CCharacterComponent* character, bool refresh = false) {
         }
         if (!ready || refresh) {
             child->SetGeometryVisible(0, 65535, 0);
-            for (const auto geoset : selected->second) child->SetGeometryVisible(geoset, geoset, 1);
+            for (const auto geoset : selected->second) ShowGeosetEntry(child, geoset);
             if (Retail::SlimeGiant::Race(character->m_data.m_preferences.m_raceID) ||
                 Retail::Centaur::Race(character->m_data.m_preferences.m_raceID) ||
                 Retail::Ethereal::Race(character->m_data.m_preferences.m_raceID))
@@ -576,14 +645,83 @@ void FinishCollections(CCharacterComponent* character, bool refresh = false) {
     SyncEtherealHandsAndFeet(character);
 }
 
+#if defined(WOWDECOMP_RETAIL_ARMOR_PHYSICS)
+using ArmorLayers = std::vector<std::pair<uint32_t, std::string>>;
+
+Retail::Armor::Character ArmorWho(uint32_t race, uint32_t sex) {
+    Retail::Armor::Character who;
+    who.gender = int32_t(sex);
+    who.retailRace = RetailRaceId(race);
+    who.donorRace = Retail::HelmetMaskRace(who.retailRace);
+    return who;
+}
+
+// Equipped Retail armor that ships as its own skinned M2 (3D chest plates, belts and buckles, leg plates, gloves, boots,
+// bracers, tabards, back pieces) rides the same collection mechanism as other rig-sharing parts: a child bound to the
+// body's skeleton. The race/gender sibling is picked from ComponentModelFileData; stock names are left to the stock path.
+void AddRetailArmorParts(CCharacterComponent* character, CollectionState& state) {
+    if (RetailRaceHidesArmor(character)) return;
+    static const ITEM_SLOT slots[] = {ITEMSLOT_CHEST, ITEMSLOT_PANTS, ITEMSLOT_BOOTS, ITEMSLOT_GLOVES, ITEMSLOT_BRACERS,
+                                      ITEMSLOT_BELT, ITEMSLOT_TABARD, ITEMSLOT_SHIRT, ITEMSLOT_CAPE};
+    const auto& prefs = character->m_data.m_preferences;
+    const auto who = ArmorWho(prefs.m_raceID, prefs.m_sexID);
+    for (const ITEM_SLOT slot : slots) {
+        ItemDisplayInfoRec display;
+        if (!character->m_itemDisplayID[slot] || !g_itemDisplayInfoDB.GetRecord(character->m_itemDisplayID[slot], &display)) continue;
+        for (int index = 0; index < 2; ++index) {
+            uint32_t id = 0;
+            std::string extension;
+            if (!Retail::Armor::ParseRetailName(display.m_modelName[index], &id, &extension) || _stricmp(extension.c_str(), ".m2")) continue;
+            std::string resolved;
+            if (Retail::Armor::ResolveModelName(display.m_modelName[index], who, resolved))
+                Retail::Armor::ParseRetailName(resolved.c_str(), &id, nullptr);
+            Retail::Source().RegisterCharacterModel(id);
+            // Slots sharing one set model accumulate their groups; each piece shows only its own parts.
+            auto& shown = state.geosets[Retail::FileName(id, ".m2")];
+            if (shown.empty()) shown.push_back(kUnclaimedGeosets);
+            for (const uint16_t group : SlotGeosetGroups(slot))
+                if (std::find(shown.begin(), shown.end(), uint16_t(kGroupFlag | group)) == shown.end())
+                    shown.push_back(uint16_t(kGroupFlag | group));
+            // Unlike the body's own collections, an armor M2's replaceable slots (object skin, types 2 and 3) are fed by the
+            // item display's ModelTexture[index]; nothing on the body supplies them, so without this the part draws white.
+            ArmorLayers& layers = state.armorTextures[Retail::FileName(id, ".m2")];
+            layers.clear();
+            if (*display.m_modelTexture[index] && Retail::Armor::IsRetailName(display.m_modelTexture[index])) {
+                std::string texture = display.m_modelTexture[index];
+                std::string resolvedTexture;
+                if (Retail::Armor::ResolveTextureName(texture.c_str(), who, resolvedTexture)) texture = resolvedTexture;
+                layers.emplace_back(2, texture);
+            }
+            const auto& typed = RetailArmorTypedLayers(static_cast<uint32_t>(display.m_id), uint32_t(index));
+            layers.insert(layers.end(), typed.begin(), typed.end());
+            if (layers.empty()) {
+                state.armorTextures.erase(Retail::FileName(id, ".m2"));
+            } else {
+                std::string key = Retail::FileName(id, ".m2");
+                std::replace(key.begin(), key.end(), '\\', '/');
+                for (const auto& layer : layers) g_armorTextureTypes[key].insert(layer.first);
+            }
+        }
+    }
+}
+#else
+void AddRetailArmorParts(CCharacterComponent*, CollectionState&) {}
+#endif
+
 // Whether the equipped helmet hides HelmetGeosetVisData slot `slot` (0 hair, 1..3 facial, 4 ears, 5..6 other) for
 // the race's helmet-mask donor.
 bool HelmetHides(CCharacterComponent* character, uint32_t slot) {
     const uint32_t sex = character->m_data.m_preferences.m_sexID;
     const uint32_t maskRace = Retail::HelmetMaskRace(RetailRaceId(character->m_data.m_preferences.m_raceID));
     ItemDisplayInfoRec display;
-    if (!maskRace || maskRace >= 32 || sex > 1 || slot >= 7 || !character->m_itemDisplayID[ITEMSLOT_HEAD]
+    if (sex > 1 || slot >= 7 || !character->m_itemDisplayID[ITEMSLOT_HEAD]
         || !g_itemDisplayInfoDB.GetRecord(character->m_itemDisplayID[ITEMSLOT_HEAD], &display)) return false;
+    // A synced Retail helm names a Retail HelmetGeosetData row; the stock table below would read it as a stock ID.
+    constexpr uint32_t kGroups[7] = {0, 1, 2, 3, 7, 16, 17};
+    std::vector<uint32_t> retailHidden;
+    if (RetailHelmetHiddenGroups(display, character->m_data.m_preferences.m_raceID, sex, retailHidden))
+        return std::find(retailHidden.begin(), retailHidden.end(), kGroups[slot]) != retailHidden.end();
+    if (!maskRace || maskRace >= 32) return false;
     const auto* visibility = g_helmetGeosetVisDataDB.GetRecord(display.m_helmetGeosetVisID[sex]);
     return visibility && (uint32_t(visibility->m_hideGeoset[slot]) & (uint32_t{1} << maskRace));
 }
@@ -593,6 +731,7 @@ void SyncCollections(CCharacterComponent* character, const app::Recipe& recipe) 
     auto& state = g_collections[character];
     state.parent = parent;
     state.geosets.clear();
+    state.armorTextures.clear();
     if (Retail::SlimeGiant::Race(character->m_data.m_preferences.m_raceID))
         state.geosets["custom/slimegiant/" + std::to_string(recipe.modelFileDataId) + "-clothing.m2"] = {1};
     if (Retail::Centaur::Race(character->m_data.m_preferences.m_raceID))
@@ -608,6 +747,7 @@ void SyncCollections(CCharacterComponent* character, const app::Recipe& recipe) 
             Retail::Source().RegisterCharacterModel(part.fileDataId);
             state.geosets[Retail::FileName(part.fileDataId, ".m2")].push_back(part.geoset);
         }
+    AddRetailArmorParts(character, state);
     for (CM2Model* child = parent->m_attachList; child;) {
         CM2Model* next = child->m_attachNext;
         if (child->m_attachmentId == CollectionSocket && !state.geosets.count(CollectionName(child)))
@@ -621,6 +761,18 @@ void SyncCollections(CCharacterComponent* character, const app::Recipe& recipe) 
         if (exists) continue;
         CM2Model* child = parent->m_scene->CreateModel(selected.first.c_str(), 0);
         if (!child) { Log("collection create failed: %s", selected.first.c_str()); continue; }
+        if (const auto armor = state.armorTextures.find(selected.first); armor != state.armorTextures.end()) {
+            for (const auto& layer : armor->second) {
+                CStatus status;
+                if (CTexture* texture = CreateTexture(layer.second.c_str(), &status)) {
+                    Log("armor texture: type %u %s on %s", layer.first, layer.second.c_str(), selected.first.c_str());
+                    child->ReplaceTexture(layer.first, texture);
+                    HandleClose(reinterpret_cast<HOBJECT>(texture));
+                } else {
+                    Log("armor texture missing: type %u %s for %s", layer.first, layer.second.c_str(), selected.first.c_str());
+                }
+            }
+        }
         child->SetGeometryVisible(0, 65535, 0); // Wait for a verified shared pose before exposing geometry.
         child->AttachToParent(parent, CollectionSocket, nullptr, 1);
         child->Release(); // The parent owns the attachment reference.
@@ -1135,6 +1287,20 @@ uint32_t RetailRaceHelmetMask(uint32_t race) {
 }
 
 uint32_t RetailRaceHelmetRace(uint32_t race) { return Retail::HelmetModelRace(race); }
+uint32_t RetailRaceChrId(uint32_t race) { return RetailRaceId(race); }
+
+#if defined(WOWDECOMP_RETAIL_ARMOR_PHYSICS)
+bool RetailHelmetHiddenGroups(const ItemDisplayInfoRec& display, uint32_t race, uint32_t sex, std::vector<uint32_t>& groups) {
+    groups.clear();
+    if (!Retail::Armor::IsRetailName(display.m_modelName[0])) return false;
+    // Retail display, so its helm vis ID names a Retail HelmetGeosetData row. With no table available it hides nothing.
+    auto& registry = Retail::Armor::Registry::Get();
+    if (registry.EnsureDisplays()) groups = registry.Displays().HelmetHiddenGroups(display.m_helmetGeosetVisID[sex > 1 ? 0 : sex], ArmorWho(race, sex));
+    return true;
+}
+#else
+bool RetailHelmetHiddenGroups(const ItemDisplayInfoRec&, uint32_t, uint32_t, std::vector<uint32_t>& groups) { groups.clear(); return false; }
+#endif
 
 bool RetailRaceHidesArmor(CCharacterComponent* character) {
     return character && Retail::Ethereal::HidesArmor(character->m_data.m_preferences.m_raceID,
@@ -1576,6 +1742,7 @@ void RetailRaceForget(CCharacterComponent* character) {
     g_eyeLightning.erase(character);
     g_hiddenLegArmor.erase(character);
     g_lookApplied.erase(character);
+    RetailArmorPhysics::Forget(character);
 }
 
 bool RetailRaceLegArmorHidden(CCharacterComponent* character) {
@@ -2067,6 +2234,12 @@ void RetailRaceTick() {
         FitLegacyHelmet(character);
         FitCentaurShoulders(character);
         FinishCollections(character);
+        {
+            // Capes, tabards, belts and chains: secondary motion on the body rig's free bones while armor is worn.
+            const auto parts = g_collections.find(character);
+            RetailArmorPhysics::Tick(character, character->m_data.m_model,
+                parts != g_collections.end() && !parts->second.geosets.empty(), OsGetAsyncTimeMs());
+        }
         if (inWorld) character->Prep();
     }
 }
@@ -2105,6 +2278,8 @@ void RetailRaceSectionArguments(int32_t race, int32_t sex, int32_t* style, int32
 bool RetailRaceMapped(uint32_t) { return false; }
 uint32_t RetailRaceHelmetMask(uint32_t race) { return race && race < 32 ? uint32_t{1} << race : 0; }
 uint32_t RetailRaceHelmetRace(uint32_t race) { return race; }
+uint32_t RetailRaceChrId(uint32_t) { return 0; }
+bool RetailHelmetHiddenGroups(const ItemDisplayInfoRec&, uint32_t, uint32_t, std::vector<uint32_t>& groups) { groups.clear(); return false; }
 bool RetailRaceHidesArmor(CCharacterComponent*) { return false; }
 bool RetailRaceActive(CCharacterComponent*) { return false; }
 bool RetailRaceOwns(uint32_t, uint32_t) { return false; }

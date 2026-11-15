@@ -5,4 +5,6 @@
 
 esteria_style.lua
 Meta.lua
+ToolChestCatalog.lua
+ToolChestArmor.lua
 ToolChest.lua

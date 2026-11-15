@@ -786,7 +786,8 @@ local npcEditor = EditorPage("npcedit", "NPC Editor", "template, models, equipme
 local objEditor = EditorPage("objedit", "Object Editor", "template, addon fields and spawn", "object", "setobject", "cloneobject", "gameobject_template")
 OpenEditor = function(id, entry, spawn)
     Show(id)
-    (id == "npcedit" and npcEditor or objEditor).Open(tonumber(entry), spawn and tonumber(spawn))
+    local page = id == "npcedit" and npcEditor or objEditor
+    page.Open(tonumber(entry), spawn and tonumber(spawn))
 end
 handlers["f"] = function(f) if editor then editor.AddField(f[1], f[2] or "") end end
 handlers["f."] = function(f) if editor then editor.Loaded(tonumber(f[1])) end end
@@ -882,6 +883,12 @@ do
     page.OnOpen = function()
         if not all then Request("commands") else Apply() end
     end
+end
+
+-- Armor & Items tab (ToolChestArmor.lua): browse the synced Retail catalogue and add or learn with a click.
+if EsteriaToolChest_BuildCatalogPage then
+    EsteriaToolChest_BuildCatalogPage({ ES = ES, W = W, H = H, RAIL = RAIL, ROW_H = ROW_H, AddPage = AddPage, Button = Button,
+        Input = Input, List = List, Run = Run, Status = Status })
 end
 
 -- Rail --------------------------------------------------------------------------------------------------------------

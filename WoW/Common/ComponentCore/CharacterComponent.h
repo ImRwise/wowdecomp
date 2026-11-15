@@ -3,6 +3,9 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
+#include <utility>
+#include <vector>
 #include "Engine/Source/BLPFile/Types.h"
 #include "Engine/Source/Gx/Types.h"
 #include "Engine/Source/Services/Types.h"
@@ -93,7 +96,7 @@ class CCharacterComponent {
     static MipBits* s_textureBuffer;
 
     static GEOCOMPONENTLINKS AddHandItem(CM2Model* model, const ItemDisplayInfoRec* displayRec, INVENTORY_SLOTS invSlot, SHEATHE_TYPE sheatheType, bool sheathed, bool shield, bool mainHand, int32_t itemVisual);
-    static void AddLink(CM2Model* parent, GEOCOMPONENTLINKS link, const char* modelPath, const char* texturePath, int32_t itemVisual, const ItemDisplayInfoRec* displayRec);
+    static void AddLink(CM2Model* parent, GEOCOMPONENTLINKS link, const char* modelPath, const char* texturePath, int32_t itemVisual, const ItemDisplayInfoRec* displayRec, uint32_t modelIndex = 0);
     static CCharacterComponent* AllocComponent();
     static CComponentMipBits* AllocComponentMipBits(EGxTexFormat format);
     static CComponentRequest* AllocComponentRequest();
@@ -277,5 +280,9 @@ class CCharacterComponent {
 bool ComponentVarHandler(CVar* var, const char* oldValue, const char* value, void* arg);
 
 CTexture* CreateTexture(const char* fileName, CStatus* status);
+
+// Typed texture layers (M2 texture type, "retail/<id>.blp") of a synced Retail armor model beyond its object skin, read from
+// Esteria\\RetailArmorTextures.csv. Empty for stock displays.
+const std::vector<std::pair<uint32_t, std::string>>& RetailArmorTypedLayers(uint32_t displayId, uint32_t modelIndex);
 
 #endif

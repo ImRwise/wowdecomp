@@ -1,6 +1,7 @@
 #include "Engine/Source/Retail/CascSource.h"
 #include "Engine/Source/Retail/RetailModel.h"
 #include "Engine/Source/Retail/Equipment.h"
+#include "Engine/Source/Retail/ResolveCli.h"
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
@@ -13,9 +14,12 @@
 int main(int argc, char** argv) {
     if (argc == 2 && std::string(argv[1]) == "--capabilities")
     {
-        std::puts("{\"original_extract\":true,\"table_extract\":true,\"native_validation\":true}");
+        std::puts("{\"original_extract\":true,\"table_extract\":true,\"native_validation\":true,\"resolve_items\":true}");
         return 0;
     }
+    // --resolve-items <list>: walk Retail item data to every dependent file, see ResolveCli.h.
+    if (argc >= 3 && std::string(argv[2]) == "--resolve-items")
+        return Retail::Resolve::ResolveMain(argc, argv);
     // --batch <list>: Read every name in the list (one per line) with one Configure, printing "ok <name>" or
     // "fail <name>: <error>"; a cold Configure costs ~30 s, so per-file runs are too slow for whole catalogs.
     if (argc == 4 && std::string(argv[2]) == "--batch") {
@@ -30,7 +34,16 @@ int main(int argc, char** argv) {
             if (name.empty()) continue;
             std::vector<uint8_t> bytes;
             error.clear();
-            if (source.Read(name.c_str(), bytes, error)) std::printf("ok %s\n", name.c_str());
+            // .phys is not a runtime format yet: Inspect returns the original bytes; the batch writes them next to the list.
+            const bool phys = name.size() > 5 && name.compare(name.size() - 5, 5, ".phys") == 0;
+            if (phys ? source.Inspect(name.c_str(), bytes, error) : source.Read(name.c_str(), bytes, error)) {
+                if (phys) {
+                    std::string out = name.substr(name.find_last_of('/') + 1);
+                    std::ofstream(std::string(argv[3]) + "." + out, std::ios::binary)
+                        .write(reinterpret_cast<const char*>(bytes.data()), std::streamsize(bytes.size()));
+                }
+                std::printf("ok %s\n", name.c_str());
+            }
             else { std::printf("fail %s: %s\n", name.c_str(), error.c_str()); ++failed; }
             std::fflush(stdout);
         }

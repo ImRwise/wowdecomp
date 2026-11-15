@@ -8,13 +8,15 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <map>
+#include <string>
+#include <vector>
 #if defined(_MSC_VER)
 #include <malloc.h>
 #else
 #include <alloca.h>
 #endif
 #include "WoW/Common/ComponentCore/CharacterComponent.h"
-#include "WoW/Common/ComponentCore/BackpackCosmetics.h"
 #include "WoW/Common/ComponentCore/EsteriaAppearance.h"
 #include "WoW/Common/ComponentCore/RetailRace.h"
 #include "WoW/Common/ComponentCore/UprightUndead.h"
@@ -56,6 +58,11 @@
 #include "WoW/Source/DB/Rec/ItemVisualsRec.h"
 #include "WoW/Source/DB/Rec/ParticleColorRec.h"
 #include "WoW/Source/Object/ObjectClient/Player_C.h"
+#if defined(WOWDECOMP_RETAIL_ASSETS) && defined(WOWDECOMP_RETAIL_ARMOR_PHYSICS)
+#include "Engine/Source/Retail/ArmorDb.h"
+#include "Engine/Source/Retail/ArmorLayers.h"
+#include "Engine/Source/Retail/ArmorPath.h"
+#endif
 #if defined(WOWDECOMP_RETAIL_ASSETS)
 #include "Engine/Source/Retail/CascSource.h"
 #include "Engine/Source/Retail/RetailModel.h"
@@ -141,6 +148,82 @@ EGxTexFormat CCharacterComponent::s_gxFormatHigh;
 
 // STATIC: 0x00B6B708
 static char s_buffer[260];
+
+#if defined(WOWDECOMP_RETAIL_ASSETS) && defined(WOWDECOMP_RETAIL_ARMOR_PHYSICS)
+// ServerSync writes complete "retail/<FileDataID>.m2|.blp" names into ItemDisplayInfo. They bypass the stock
+// Item\ObjectComponents\<folder>\ prefix (SFile already routes "retail/..." to packed -> cache -> CDN), and the
+// race/gender variant of the part is chosen from the Retail component tables. Return false for stock names.
+static Retail::Armor::Character RetailArmorWho(uint32_t race, uint32_t sex) {
+    Retail::Armor::Character who;
+    who.gender = static_cast<int32_t>(sex);
+    who.retailRace = RetailRaceChrId(race);
+    who.donorRace = Retail::HelmetMaskRace(who.retailRace);
+    return who;
+}
+
+static bool RetailItemModel(char* out, size_t size, const char* name, uint32_t race, uint32_t sex) {
+    if (!Retail::Armor::IsRetailName(name)) {
+        return false;
+    }
+
+    std::string path = name;
+    std::string resolved;
+
+    if (Retail::Armor::ResolveModelName(name, RetailArmorWho(race, sex), resolved)) {
+        path = resolved;
+    }
+
+    return Retail::Armor::CopyPath(out, size, path);
+}
+
+static bool RetailItemTexture(char* out, size_t size, const char* name, uint32_t race, uint32_t sex) {
+    if (!Retail::Armor::IsRetailName(name)) {
+        return false;
+    }
+
+    std::string path = name;
+    std::string resolved;
+
+    if (Retail::Armor::ResolveTextureName(name, RetailArmorWho(race, sex), resolved)) {
+        path = resolved;
+    }
+
+    return Retail::Armor::CopyPath(out, size, path);
+}
+#else
+static bool RetailItemModel(char*, size_t, const char*, uint32_t, uint32_t) { return false; }
+static bool RetailItemTexture(char*, size_t, const char*, uint32_t, uint32_t) { return false; }
+#endif
+
+// Esteria\RetailArmorTextures.csv (written by ServerSync): "displayId,modelIndex,textureType,retail/<id>.blp" for the typed texture
+// layers a Retail armor model needs beyond its object skin (type 2, carried by ItemDisplayInfo.ModelTexture): the second layer
+// of a pauldron or belt is type 3. Without them those M2 slots stay unbound and the part draws white.
+const std::vector<std::pair<uint32_t, std::string>>& RetailArmorTypedLayers(uint32_t displayId, uint32_t modelIndex) {
+    static const std::map<uint64_t, std::vector<std::pair<uint32_t, std::string>>> layers = [] {
+        std::map<uint64_t, std::vector<std::pair<uint32_t, std::string>>> result;
+        void* file = nullptr;
+        uint32_t size = 0;
+        if (!SFile::LoadFile("Esteria\\RetailArmorTextures.csv", &file, &size, 0, nullptr) || !file) return result;
+        const std::string text(static_cast<const char*>(file), size);
+        SFile::Unload(file);
+        size_t at = 0;
+        while (at < text.size()) {
+            size_t end = text.find('\n', at);
+            if (end == std::string::npos) end = text.size();
+            const std::string line = text.substr(at, end - at);
+            at = end + 1;
+            if (line.empty() || line[0] == '#') continue;
+            unsigned display = 0, model = 0, type = 0;
+            char name[128] = {};
+            if (sscanf_s(line.c_str(), "%u,%u,%u,%127s", &display, &model, &type, name, unsigned(sizeof(name))) == 4 && model < 2)
+                result[(uint64_t(display) << 8) | model].emplace_back(type, name);
+        }
+        return result;
+    }();
+    static const std::vector<std::pair<uint32_t, std::string>> none;
+    const auto found = layers.find((uint64_t(displayId) << 8) | modelIndex);
+    return found == layers.end() ? none : found->second;
+}
 
 // STATIC: 0x00B6B80C
 void (CCharacterComponent::*CCharacterComponent::m_itemFunc[NUM_COMPONENT_SECTIONS])(ITEM_SLOT, const ItemDisplayInfoRec*, bool);
@@ -261,6 +344,10 @@ static int32_t CopyStringToBuffer(const char* src, char* dst) {
 // VERIFY: 576ded8c auto
 // OFFSET: 0x004E6FB0
 void* CCharacterComponent::LoadItemComponentTexture(const ItemDisplayInfoRec* displayRec, COMPONENT_SECTIONS section) {
+    if (RetailItemTexture(s_path, sizeof(s_path), displayRec->m_texture[section], this->m_data.m_preferences.m_raceID, this->m_data.m_preferences.m_sexID)) {
+        return TextureCacheCreateTexture(s_path);
+    }
+
     SStrPrintf(s_path, sizeof(s_path), "Item\\TextureComponents\\%s\\%s_%s.blp", s_componentSections[section], displayRec->m_texture[section], s_fileDecorations[2]);
 
     if (!SFile::FileExists(s_path)) {
@@ -472,6 +559,10 @@ void CCharacterComponent::ApplyMonsterGeosets(CM2Model* model, const CreatureDis
 // VERIFY: 6f039c48 manual
 // OFFSET: 0x004E7800
 int32_t CCharacterComponent::ComposeHelmModelFilePath(const ChrRacesRec* raceRec, const ItemDisplayInfoRec* displayRec, char* buffer, uint32_t size) {
+    if (RetailItemModel(buffer, size, displayRec->m_modelName[0], this->m_data.m_preferences.m_raceID, this->m_data.m_preferences.m_sexID)) {
+        return 1;
+    }
+
     char path[260];
     strcpy(path, "Item\\ObjectComponents\\Head\\");
     strcat(path, displayRec->m_modelName[0]);
@@ -980,7 +1071,9 @@ void CCharacterComponent::PasteOpaque(void* texture, const BlpPalPixel* pal, Mip
     }
 
     for (uint32_t mip = srcMipLevel; mip < srcInfo.m_mipCount; mip++) {
-        const uint8_t* src = static_cast<const uint8_t*>(TextureCacheGetMip(texture, mip)) + srcPos.x + srcWidth * srcPos.y;
+        const uint8_t* mipBits = static_cast<const uint8_t*>(TextureCacheGetMip(texture, mip));
+        if (!mipBits) break;   // a BLP with a missing or truncated mip level: paste what exists
+        const uint8_t* src = mipBits + srcPos.x + srcWidth * srcPos.y;
         uint8_t* dst = reinterpret_cast<uint8_t*>(dstMips->m_mip[mip + dstMipOffset]) + dstStride * dstPos.y + 4 * dstPos.x;
 
         for (const uint8_t* end = src + srcWidth * height; src < end; src += srcWidth, dst += dstStride) {
@@ -1015,7 +1108,9 @@ void CCharacterComponent::PasteTransparent1Bit(void* texture, const BlpPalPixel*
     }
 
     for (uint32_t mip = srcMipLevel; mip < srcInfo.m_mipCount; mip++) {
-        const uint8_t* src = static_cast<const uint8_t*>(TextureCacheGetMip(texture, mip));
+        const uint8_t* mipBits = static_cast<const uint8_t*>(TextureCacheGetMip(texture, mip));
+        if (!mipBits) break;   // a BLP with a missing or truncated mip level: paste what exists
+        const uint8_t* src = mipBits;
         uint8_t* dst = reinterpret_cast<uint8_t*>(dstMips->m_mip[mip + dstMipOffset]) + dstStride * dstPos.y + 4 * dstPos.x;
         const uint8_t* end = src + srcWidth * height;
         const uint8_t* alpha = end;
@@ -1054,7 +1149,9 @@ void CCharacterComponent::PasteTransparent4Bit(void* texture, const BlpPalPixel*
     }
 
     for (uint32_t mip = srcMipLevel; mip < srcInfo.m_mipCount; mip++) {
-        const uint8_t* src = static_cast<const uint8_t*>(TextureCacheGetMip(texture, mip));
+        const uint8_t* mipBits = static_cast<const uint8_t*>(TextureCacheGetMip(texture, mip));
+        if (!mipBits) break;   // a BLP with a missing or truncated mip level: paste what exists
+        const uint8_t* src = mipBits;
         const uint8_t* end = src + srcWidth * height;
         const uint8_t* alpha = end;
         uint8_t* dst = reinterpret_cast<uint8_t*>(dstMips->m_mip[mip + dstMipOffset]) + dstStride * dstPos.y + 4 * dstPos.x;
@@ -1097,7 +1194,9 @@ void CCharacterComponent::PasteTransparent8Bit(void* texture, const BlpPalPixel*
     }
 
     for (uint32_t mip = srcMipLevel; mip < srcInfo.m_mipCount; mip++) {
-        const uint8_t* src = static_cast<const uint8_t*>(TextureCacheGetMip(texture, mip));
+        const uint8_t* mipBits = static_cast<const uint8_t*>(TextureCacheGetMip(texture, mip));
+        if (!mipBits) break;   // a BLP with a missing or truncated mip level: paste what exists
+        const uint8_t* src = mipBits;
         // A mip holds srcWidth x mipHeight palette indices followed by the same-sized alpha plane; never read past it.
         const uint32_t mipHeight = (srcInfo.m_height >> mip) ? srcInfo.m_height >> mip : 1;
         const uint32_t rows = height < mipHeight ? height : mipHeight;
@@ -1144,7 +1243,9 @@ void CCharacterComponent::PasteOpaqueScale(void* texture, MipBits* dstMips, C2iV
 
     srcPos.x >>= 1;
     srcPos.y >>= 1;
-    const uint8_t* src = static_cast<const uint8_t*>(TextureCacheGetMip(texture, 0)) + srcPos.x + srcWidth * srcPos.y;
+    const uint8_t* mip0 = static_cast<const uint8_t*>(TextureCacheGetMip(texture, 0));
+    if (!mip0) return;
+    const uint8_t* src = mip0 + srcPos.x + srcWidth * srcPos.y;
     uint8_t* row = reinterpret_cast<uint8_t*>(dstMips->m_mip[0]) + dstStride * dstPos.y + 4 * dstPos.x;
 
     for (uint32_t y = 0; y < height; y++, row += dstStride) {
@@ -2153,7 +2254,7 @@ static void ReplaceParticleColor(int32_t particleColorID, CM2Model* model) {
 
 // VERIFY: a5287802 manual
 // OFFSET: 0x004EAA70
-void CCharacterComponent::AddLink(CM2Model* parent, GEOCOMPONENTLINKS link, const char* modelPath, const char* texturePath, int32_t itemVisual, const ItemDisplayInfoRec* displayRec) {
+void CCharacterComponent::AddLink(CM2Model* parent, GEOCOMPONENTLINKS link, const char* modelPath, const char* texturePath, int32_t itemVisual, const ItemDisplayInfoRec* displayRec, uint32_t modelIndex) {
     if (!parent) {
         return;
     }
@@ -2173,6 +2274,16 @@ void CCharacterComponent::AddLink(CM2Model* parent, GEOCOMPONENTLINKS link, cons
 
     model->ReplaceTexture(2, texture);
     HandleClose(reinterpret_cast<HOBJECT>(texture));
+
+    // A synced Retail model can also name a second replaceable layer (type 3...); bind it too or the part draws white.
+    if (displayRec) {
+        for (const auto& layer : RetailArmorTypedLayers(static_cast<uint32_t>(displayRec->m_id), modelIndex)) {
+            if (CTexture* extra = CreateTexture(layer.second.c_str(), &s_status)) {
+                model->ReplaceTexture(layer.first, extra);
+                HandleClose(reinterpret_cast<HOBJECT>(extra));
+            }
+        }
+    }
 
     if (itemVisual > 0) {
         CCharacterComponent::ComponentUtilAddItemVisual(model, itemVisual);
@@ -2211,12 +2322,18 @@ CM2Model* CCharacterComponent::MakeAmmoModel(CM2Model* model, const ItemDisplayI
     }
 
     char modelPath[260];
-    strcpy(modelPath, folder);
-    strcat(modelPath, modelName);
+
+    if (!RetailItemModel(modelPath, sizeof(modelPath), modelName, 0, 0)) {
+        strcpy(modelPath, folder);
+        strcat(modelPath, modelName);
+    }
 
     char texturePath[260];
-    strcpy(texturePath, folder);
-    strcat(texturePath, displayRec->m_modelTexture[1]);
+
+    if (!RetailItemTexture(texturePath, sizeof(texturePath), displayRec->m_modelTexture[1], 0, 0)) {
+        strcpy(texturePath, folder);
+        strcat(texturePath, displayRec->m_modelTexture[1]);
+    }
 
     CM2Model* ammoModel = model->m_scene->CreateModel(modelPath, 0);
 
@@ -2292,13 +2409,19 @@ GEOCOMPONENTLINKS CCharacterComponent::AddHandItem(CM2Model* model, const ItemDi
     }
 #endif
 
-    strcpy(s_buffer, folder);
-    strcat(s_buffer, displayRec->m_modelName[0]);
+    if (!RetailItemModel(s_buffer, sizeof(s_buffer), displayRec->m_modelName[0], 0, 0)) {
+        strcpy(s_buffer, folder);
+        strcat(s_buffer, displayRec->m_modelName[0]);
+    }
+
     strcpy(s_pathEnd, s_buffer);
 
-    strcpy(s_buffer, folder);
-    strcat(s_buffer, displayRec->m_modelTexture[0]);
-    strcat(s_buffer, ".blp");
+    if (!RetailItemTexture(s_buffer, sizeof(s_buffer), displayRec->m_modelTexture[0], 0, 0)) {
+        strcpy(s_buffer, folder);
+        strcat(s_buffer, displayRec->m_modelTexture[0]);
+        strcat(s_buffer, ".blp");
+    }
+
     strcpy(s_pathEnd2, s_buffer);
 
     CCharacterComponent::AddLink(model, link, s_path, s_path2, itemVisual ? itemVisual : displayRec->m_itemVisual, displayRec);
@@ -3089,6 +3212,7 @@ void CCharacterComponent::PasteTransparent1BitScale(void* texture, MipBits* dstM
     srcPos.y >>= 1;
 
     const uint8_t* srcBase = static_cast<const uint8_t*>(TextureCacheGetMip(texture, 0));
+    if (!srcBase) return;
     const uint8_t* alphaBase = srcBase + srcRowPitch * srcInfo.m_height;
 
     uint8_t* dstRow = reinterpret_cast<uint8_t*>(dstMips->m_mip[0]) + dstStride * dstPos.y + 4 * dstPos.x;
@@ -3224,6 +3348,7 @@ void CCharacterComponent::PasteTransparent4BitScale(void* texture, MipBits* dstM
     srcPos.y >>= 1;
 
     const uint8_t* srcBase = static_cast<const uint8_t*>(TextureCacheGetMip(texture, 0));
+    if (!srcBase) return;
     const uint8_t* alphaBase = srcBase + srcRowPitch * srcInfo.m_height;
 
     uint8_t* dstRow = reinterpret_cast<uint8_t*>(dstMips->m_mip[0]) + dstStride * dstPos.y + 4 * dstPos.x;
@@ -3375,6 +3500,7 @@ void CCharacterComponent::PasteTransparent8BitScale(void* texture, MipBits* dstM
     srcPos.y >>= 1;
 
     const uint8_t* srcBase = static_cast<const uint8_t*>(TextureCacheGetMip(texture, 0));
+    if (!srcBase) return;
     const uint8_t* alphaBase = srcBase + srcRowPitch * srcInfo.m_height;
 
     uint8_t* dstRow = reinterpret_cast<uint8_t*>(dstMips->m_mip[0]) + dstStride * dstPos.y + 4 * dstPos.x;
@@ -3700,7 +3826,6 @@ void CCharacterComponent::GeosRenderPrep() {
 
     RetailRaceEquipment(this);
     EsteriaNativeEquipment(this);
-    EsteriaBackpackEquipment(this);
     this->m_data.m_model->OptimizeVisibleGeometry();
     this->m_flags &= ~0x4;
 }
@@ -4014,12 +4139,28 @@ void CCharacterComponent::AddHelm(int32_t itemVisual) {
         return;
     }
 
-    strcpy(s_buffer, "Item\\ObjectComponents\\Head\\");
-    strcat(s_buffer, displayRec->m_modelTexture[0]);
-    strcat(s_buffer, ".blp");
+    if (!RetailItemTexture(s_buffer, sizeof(s_buffer), displayRec->m_modelTexture[0], this->m_data.m_preferences.m_raceID, this->m_data.m_preferences.m_sexID)) {
+        strcpy(s_buffer, "Item\\ObjectComponents\\Head\\");
+        strcat(s_buffer, displayRec->m_modelTexture[0]);
+        strcat(s_buffer, ".blp");
+    }
+
     strcpy(s_pathEnd2, s_buffer);
 
     CCharacterComponent::AddLink(this->m_data.m_model, ATTACH_HELM, s_path, s_path2, itemVisual, displayRec);
+
+    // A Retail helm names a Retail HelmetGeosetData row, not a stock HelmetGeosetVisData ID: hide its groups directly.
+    std::vector<uint32_t> retailHidden;
+
+    if (RetailHelmetHiddenGroups(*displayRec, this->m_data.m_preferences.m_raceID, this->m_data.m_preferences.m_sexID, retailHidden)) {
+        for (uint32_t group : retailHidden) {
+            if (group < 19) {
+                this->m_data.m_geosets[group] = group ? group * 100 + 1 : 1;
+            }
+        }
+
+        return;
+    }
 
     HelmetGeosetVisDataRec* visRec = g_helmetGeosetVisDataDB.GetRecord(displayRec->m_helmetGeosetVisID[this->m_data.m_preferences.m_sexID]);
 
@@ -4070,8 +4211,11 @@ int32_t CCharacterComponent::GetQuiverModelFilePath(ItemDisplayInfoRec& rec, con
     }
 
     displayRec = &rec;
-    strcpy(s_buffer, "Item\\ObjectComponents\\Quiver\\");
-    strcat(s_buffer, displayRec->m_modelName[0]);
+    if (!RetailItemModel(s_buffer, sizeof(s_buffer), displayRec->m_modelName[0], this->m_data.m_preferences.m_raceID, this->m_data.m_preferences.m_sexID)) {
+        strcpy(s_buffer, "Item\\ObjectComponents\\Quiver\\");
+        strcat(s_buffer, displayRec->m_modelName[0]);
+    }
+
     strcpy(s_pathEnd, s_buffer);
 
     return 1;
@@ -4112,9 +4256,12 @@ void CCharacterComponent::AddQuiver(int32_t itemVisual) {
         return;
     }
 
-    strcpy(s_buffer, "Item\\ObjectComponents\\Quiver\\");
-    strcat(s_buffer, displayRec->m_modelTexture[0]);
-    strcat(s_buffer, ".blp");
+    if (!RetailItemTexture(s_buffer, sizeof(s_buffer), displayRec->m_modelTexture[0], this->m_data.m_preferences.m_raceID, this->m_data.m_preferences.m_sexID)) {
+        strcpy(s_buffer, "Item\\ObjectComponents\\Quiver\\");
+        strcat(s_buffer, displayRec->m_modelTexture[0]);
+        strcat(s_buffer, ".blp");
+    }
+
     strcpy(s_pathEnd2, s_buffer);
 
     this->m_itemSlotForAttachSlot[ATTACH_SHEATH_MAINHAND] = ITEMSLOT_11;
@@ -4142,27 +4289,39 @@ int32_t CCharacterComponent::BuildShoulderItemPaths(ItemDisplayInfoRec& rec, con
     displayRec = &rec;
 
     if (*rec.m_modelName[0]) {
-        strcpy(s_buffer, "Item\\ObjectComponents\\Shoulder\\");
-        strcat(s_buffer, displayRec->m_modelName[0]);
+        if (!RetailItemModel(s_buffer, sizeof(s_buffer), displayRec->m_modelName[0], this->m_data.m_preferences.m_raceID, this->m_data.m_preferences.m_sexID)) {
+            strcpy(s_buffer, "Item\\ObjectComponents\\Shoulder\\");
+            strcat(s_buffer, displayRec->m_modelName[0]);
+        }
+
         strcpy(leftModel, s_buffer);
 
         if (leftTexture) {
-            strcpy(s_buffer, "Item\\ObjectComponents\\Shoulder\\");
-            strcat(s_buffer, displayRec->m_modelTexture[0]);
-            strcat(s_buffer, ".blp");
+            if (!RetailItemTexture(s_buffer, sizeof(s_buffer), displayRec->m_modelTexture[0], this->m_data.m_preferences.m_raceID, this->m_data.m_preferences.m_sexID)) {
+                strcpy(s_buffer, "Item\\ObjectComponents\\Shoulder\\");
+                strcat(s_buffer, displayRec->m_modelTexture[0]);
+                strcat(s_buffer, ".blp");
+            }
+
             strcpy(leftTexture, s_buffer);
         }
     }
 
     if (*displayRec->m_modelName[1]) {
-        strcpy(s_buffer, "Item\\ObjectComponents\\Shoulder\\");
-        strcat(s_buffer, displayRec->m_modelName[1]);
+        if (!RetailItemModel(s_buffer, sizeof(s_buffer), displayRec->m_modelName[1], this->m_data.m_preferences.m_raceID, this->m_data.m_preferences.m_sexID)) {
+            strcpy(s_buffer, "Item\\ObjectComponents\\Shoulder\\");
+            strcat(s_buffer, displayRec->m_modelName[1]);
+        }
+
         strcpy(rightModel, s_buffer);
 
         if (rightTexture) {
-            strcpy(s_buffer, "Item\\ObjectComponents\\Shoulder\\");
-            strcat(s_buffer, displayRec->m_modelTexture[1]);
-            strcat(s_buffer, ".blp");
+            if (!RetailItemTexture(s_buffer, sizeof(s_buffer), displayRec->m_modelTexture[1], this->m_data.m_preferences.m_raceID, this->m_data.m_preferences.m_sexID)) {
+                strcpy(s_buffer, "Item\\ObjectComponents\\Shoulder\\");
+                strcat(s_buffer, displayRec->m_modelTexture[1]);
+                strcat(s_buffer, ".blp");
+            }
+
             strcpy(rightTexture, s_buffer);
         }
     }
@@ -4225,11 +4384,11 @@ void CCharacterComponent::AddShoulders(int32_t itemVisual) {
     }
 
     if (leftModel[0]) {
-        CCharacterComponent::AddLink(this->m_data.m_model, static_cast<GEOCOMPONENTLINKS>(6), leftModel, leftTexture, itemVisual, displayRec);
+        CCharacterComponent::AddLink(this->m_data.m_model, static_cast<GEOCOMPONENTLINKS>(6), leftModel, leftTexture, itemVisual, displayRec, 0);
     }
 
     if (rightModel[0]) {
-        CCharacterComponent::AddLink(this->m_data.m_model, static_cast<GEOCOMPONENTLINKS>(5), rightModel, rightTexture, itemVisual, displayRec);
+        CCharacterComponent::AddLink(this->m_data.m_model, static_cast<GEOCOMPONENTLINKS>(5), rightModel, rightTexture, itemVisual, displayRec, 1);
     }
 }
 
@@ -4908,12 +5067,61 @@ void CCharacterComponent::PasteFromSkinBase(COMPONENT_SECTIONS section, void* te
     CCharacterComponent::Paste(texture, dstMips, s_sectionInfo[section].m_pos, s_sectionInfo[section].m_pos, s_sectionInfo[section].m_size, info, mipLevel);
 }
 
+#if defined(WOWDECOMP_RETAIL_ASSETS) && defined(WOWDECOMP_RETAIL_ARMOR_PHYSICS)
+// Retail-named armor layers ("retail/<FileDataID>.blp") are DXT/raw BLPs of any size, which the stock palette paster
+// cannot read. Decode the loaded file, blend it over the section and refresh the covered mips (D3D11 and Vulkan
+// both upload this finished BGRA chain). Returns true when the layer was Retail's, whether or not it painted.
+static bool RetailPasteLayer(COMPONENT_SECTIONS section, void* texture, MipBits* dstMips) {
+    const char* name = TextureCacheGetName(texture);
+
+    if (!name || !Retail::Armor::IsRetailName(name)) {
+        return false;
+    }
+
+    const uint8_t* file = nullptr;
+    uint32_t fileSize = 0;
+    Retail::Image layer;
+    std::string error;
+
+    if (!TextureCacheGetFile(texture, file, fileSize) || !Retail::Armor::DecodeLayer(file, fileSize, layer, error)) {
+        static bool reported;
+
+        if (!reported) {
+            reported = true;
+            DebugLog("retail armor layer %s not painted: %s\n", name, error.empty() ? "not loaded" : error.c_str());
+        }
+
+        return true;
+    }
+
+    uint8_t* mips[16] = {};
+    uint32_t count = 0;
+
+    for (uint32_t level = 0; level < 16 && (s_textureSize >> level) > 0 && dstMips->m_mip[level]; level++) {
+        mips[count++] = reinterpret_cast<uint8_t*>(dstMips->m_mip[level]);
+    }
+
+    const CompSectionInfo& info = s_sectionInfo[section];
+    const Retail::Armor::SectionRect rect{static_cast<uint32_t>(info.m_pos.x), static_cast<uint32_t>(info.m_pos.y),
+                                          static_cast<uint32_t>(info.m_size.x), static_cast<uint32_t>(info.m_size.y)};
+    Retail::Armor::PasteLayer(mips, count, s_textureSize, rect, layer, Retail::Armor::LayerOp::Alpha);
+
+    return true;
+}
+#endif
+
 // VERIFY: c9c0de88 auto
 // OFFSET: 0x004F08A0
 void CCharacterComponent::PasteToSection(COMPONENT_SECTIONS section, void* texture, MipBits* dstMips) {
     if (!TextureCacheHasMips(texture)) {
         return;
     }
+
+#if defined(WOWDECOMP_RETAIL_ASSETS) && defined(WOWDECOMP_RETAIL_ARMOR_PHYSICS)
+    if (RetailPasteLayer(section, texture, dstMips)) {
+        return;
+    }
+#endif
 
     TCTEXTUREINFO info;
     info.m_width = 0;
@@ -5363,8 +5571,6 @@ void CCharacterComponent::RenderPrepSections() {
 // VERIFY: e78118c6 manual
 // OFFSET: 0x004F1520
 bool CCharacterComponent::RenderPrep(int32_t wait) {
-    // Measure cosmetic mounts only after GeosRenderPrep selects the actual body/equipment surfaces.
-    if (EsteriaBackpackPending(this)) this->m_flags |= 0x4;
     if (EsteriaNativeEquipmentPending(this)) this->m_flags |= 0x4;
     if (this->m_data.m_flags & 0x1) {
         if (this->m_flags & 0x4) {
@@ -5415,7 +5621,6 @@ bool CCharacterComponent::RenderPrep(int32_t wait) {
 // VERIFY: 3d69252b auto
 // OFFSET: 0x004F16C0
 void CCharacterComponent::FreeComponent(CCharacterComponent* component) {
-    EsteriaBackpackForget(component);
     EsteriaForgetCharacter(component);
     RetailRaceForget(component);
     uint32_t* heap = s_componentHeap;
@@ -5818,9 +6023,12 @@ void CCharacterComponent::AddCape() {
         return;
     }
 
-    strcpy(s_buffer, "Item\\ObjectComponents\\Cape\\");
-    strcat(s_buffer, rec.m_modelTexture[0]);
-    strcat(s_buffer, ".blp");
+    if (!RetailItemTexture(s_buffer, sizeof(s_buffer), rec.m_modelTexture[0], this->m_data.m_preferences.m_raceID, this->m_data.m_preferences.m_sexID)) {
+        strcpy(s_buffer, "Item\\ObjectComponents\\Cape\\");
+        strcat(s_buffer, rec.m_modelTexture[0]);
+        strcat(s_buffer, ".blp");
+    }
+
     strcpy(s_pathEnd, s_buffer);
 
     CStatus status;

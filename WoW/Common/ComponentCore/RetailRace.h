@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 
 class CCharacterComponent;
 struct CharacterPreferences;
@@ -22,6 +23,12 @@ bool RetailRaceMapped(uint32_t race);
 // Bounded visual donor mask for stock helmet hides, including mapped custom race IDs >= 32.
 uint32_t RetailRaceHelmetMask(uint32_t race);
 uint32_t RetailRaceHelmetRace(uint32_t race);
+// Retail ChrRaces ID mapped to a client race (RetailRaces.csv); 0 when the race has no Retail model.
+uint32_t RetailRaceChrId(uint32_t race);
+// For an equipped helm whose display names a Retail model ("retail/<id>.m2"): fills the geoset groups its Retail
+// HelmetGeosetData hides for this race/sex and returns true. Returns false for stock helms (use the stock table).
+class ItemDisplayInfoRec;
+bool RetailHelmetHiddenGroups(const ItemDisplayInfoRec& display, uint32_t race, uint32_t sex, std::vector<uint32_t>& groups);
 bool RetailRaceHidesArmor(CCharacterComponent* character);
 
 // True if the component's model is a Retail model of a mapped race. Retail geoset/texture logic must only run

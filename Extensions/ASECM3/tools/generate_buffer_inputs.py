@@ -5,7 +5,7 @@ from pathlib import Path
 root = Path(__file__).resolve().parents[1]
 source = root/"data/madd_shader_inputs.json"
 data = json.loads(source.read_text())
-lines = ["// Input SHA256: madd_shader_inputs.json "+hashlib.sha256(source.read_bytes()).hexdigest(),
+lines = ["// Input SHA256: madd_shader_inputs.json "+hashlib.sha256(source.read_bytes().replace(b"\r\n",b"\n")).hexdigest(),
          "// Named parameter metadata extracted from four agreeing HotS shader-cache sections.",
          "constexpr BufferGroupName bufferGroupNames[]={"]
 for group in data["groups"]:

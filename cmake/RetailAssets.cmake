@@ -46,12 +46,24 @@ add_library(RetailAssets STATIC
     "${CMAKE_SOURCE_DIR}/Engine/Source/Retail/RetailShader.cpp"
     "${CMAKE_SOURCE_DIR}/Engine/Source/Retail/ClientTables.cpp"
     "${CMAKE_SOURCE_DIR}/Engine/Source/Retail/Db2.cpp"
+    "${CMAKE_SOURCE_DIR}/Engine/Source/Retail/DependencyResolver.cpp"
+    "${CMAKE_SOURCE_DIR}/Engine/Source/Retail/DependencyResolverIo.cpp"
+    "${CMAKE_SOURCE_DIR}/Engine/Source/Retail/ResolveCli.cpp"
+    "${CMAKE_SOURCE_DIR}/Engine/Source/Retail/ParallelFetch.cpp"
+    "${CMAKE_SOURCE_DIR}/Engine/Source/Retail/ArmorDb.cpp"
+    "${CMAKE_SOURCE_DIR}/Engine/Source/Retail/ArmorLayers.cpp"
+    "${CMAKE_SOURCE_DIR}/Engine/Source/Retail/ArmorPhysics.cpp"
+    "${CMAKE_SOURCE_DIR}/Engine/Source/Retail/PhysFile.cpp"
+    "${CMAKE_SOURCE_DIR}/Engine/Source/Retail/ArmorPhysicsSpec.cpp"
     "${CMAKE_SOURCE_DIR}/Engine/Source/Retail/Appearance.cpp"
     "${CMAKE_SOURCE_DIR}/Engine/Source/Retail/Compose.cpp"
     "${CMAKE_SOURCE_DIR}/Engine/Source/Retail/BusyNotice.cpp"
 )
 target_include_directories(RetailAssets PUBLIC "${CMAKE_SOURCE_DIR}")
 target_compile_definitions(RetailAssets PUBLIC WOWDECOMP_RETAIL_ASSETS=1)
+if (WOWDECOMP_RETAIL_ARMOR_PHYSICS)
+    target_compile_definitions(RetailAssets PUBLIC WOWDECOMP_RETAIL_ARMOR_PHYSICS=1)
+endif ()
 target_link_libraries(RetailAssets PRIVATE casc_static)
 
 add_executable(RetailAssetProbe "${CMAKE_SOURCE_DIR}/Tools/RetailAssets/probe.cpp")
@@ -89,6 +101,16 @@ enable_testing()
 add_test(NAME retail-assets COMMAND RetailAssetTests)
 add_test(NAME hots-source COMMAND HotSSourceTests)
 add_test(NAME retail-wmo COMMAND RetailWmoTests)
+add_executable(ResolverTests "${CMAKE_SOURCE_DIR}/Tools/RetailAssets/resolver_tests.cpp")
+target_link_libraries(ResolverTests PRIVATE RetailAssets)
+add_test(NAME retail-resolver COMMAND ResolverTests)
+add_executable(ArmorTests "${CMAKE_SOURCE_DIR}/Tools/RetailAssets/armor_tests.cpp")
+target_link_libraries(ArmorTests PRIVATE RetailAssets)
+add_test(NAME retail-armor COMMAND ArmorTests)
+add_executable(PhysicsTests "${CMAKE_SOURCE_DIR}/Tools/RetailAssets/physics_tests.cpp")
+target_link_libraries(PhysicsTests PRIVATE RetailAssets)
+target_include_directories(PhysicsTests PRIVATE "${CMAKE_SOURCE_DIR}/Extensions/ASECM3/include")
+add_test(NAME retail-armor-physics COMMAND PhysicsTests)
 add_executable(CascRangeTests "${CMAKE_SOURCE_DIR}/Tools/RetailAssets/range_tests.cpp")
 target_include_directories(CascRangeTests PRIVATE "${WOWDECOMP_CASCLIB_SOURCE_DIR}/src")
 target_link_libraries(CascRangeTests PRIVATE casc_static)
@@ -98,6 +120,8 @@ if (Python3_Interpreter_FOUND)
         "${CMAKE_SOURCE_DIR}/Tools/RetailAssets/test_ranges.py" "$<TARGET_FILE:CascRangeTests>")
     add_test(NAME casc-cache-trim COMMAND "${Python3_EXECUTABLE}"
         "${CMAKE_SOURCE_DIR}/Tools/RetailAssets/test_cache_trim.py" "$<TARGET_FILE:CdnCacheTrim>")
+    add_test(NAME server-sync COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/Tools/ServerSync/test_server_sync.py")
+    add_test(NAME patch-builder COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/Tools/PatchBuilder/test_patch_builder.py")
     add_test(NAME packed-originals COMMAND "${Python3_EXECUTABLE}"
         "${CMAKE_SOURCE_DIR}/Tools/RetailAssets/test_packed.py" "$<TARGET_FILE:PackedAssetTests>")
 endif ()

@@ -1,0 +1,35 @@
+{
+  "server_root": "../EsteriaWoW",
+  "server_data_dir": "C:/Esteria/server/data",
+  "base_dbc_dir": "C:/Esteria/server/data/dbc",
+  "continuation_subdir": "dbc-continuations",
+  "project": "retail-armor",
+  "tier": 1,
+  "id_floor": {
+    "ItemDisplayInfo": 700000,
+    "item_template": 1000000
+  },
+  "reserved_ranges": {
+    "ItemDisplayInfo": [],
+    "item_template": [
+      [
+        1000000,
+        1001999
+      ]
+    ]
+  },
+  "chunk_size": 2000,
+  "stage_dir": "build/retail-sync/stage",
+  "state_file": "build/retail-sync/sync_state.json",
+  "probe_exe": "build/stageA/Release/RetailAssetProbe.exe",
+  "retail_ini": "cdn_config.json",
+  "db": {
+    "host": "127.0.0.1",
+    "port": 3306,
+    "user": "root",
+    "password": "",
+    "database": "acore_world"
+  },
+  "client_data_dir": "C:/Esteria/Esteria - Client/Data",
+  "stormlib": "C:/Esteria/Esteria - Client/StormLib.dll"
+}

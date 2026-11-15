@@ -13,3 +13,8 @@ target_link_libraries(WorldClient
     PRIVATE
         Extension
 )
+
+# LivingWind hands the Retail armor physics its wind (needs the WOWDECOMP_RETAIL_* defines RetailAssets carries)
+if (WOWDECOMP_RETAIL_ASSETS)
+    target_link_libraries(WorldClient PRIVATE RetailAssets)
+endif ()

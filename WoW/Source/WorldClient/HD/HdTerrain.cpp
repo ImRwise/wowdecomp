@@ -406,9 +406,10 @@ float3 HdCombine(float3 light, float3 buffer)
     return pow(pow(max(light, 0.0), 2.2) + buffer, 1.0 / 2.2);
 }
 
-// Terrain parallax occlusion mapping. The height of a pixel is the luminance of the layer textures, blended by the layer
-// weights w (the same weights the colour blend ends up with); u0..u3 are the layers' texture coordinates already shifted,
-// lod the mip level to read. Layers that are not there, or weigh nothing, cost no fetch.
+// Terrain parallax occlusion mapping with filtered heights. The height of a pixel is the luminance of the layer textures
+// read at a blurred mip (micro grain, such as sand, averages away instead of turning into spikes), blended by the layer
+// weights w (the same weights the colour blend ends up with); u0..u3 are the layers' texture coordinates already
+// shifted, lod the mip level to read. Layers that are not there, or weigh nothing, cost no fetch.
 float PomLum(float4 c)
 {
     return dot(c.rgb, float3(0.299, 0.587, 0.114));
@@ -429,8 +430,37 @@ float PomH(float2 u0, float2 u1, float2 u2, float2 u3, float4 w, float4 lod)
 #if LAYERS >= 4
     [branch] if (w.w > 0.01) h = h + w.w * PomLum(tex2Dlod(sLayer3, float4(u3, 0.0, lod.w)));
 #endif
-    // a little contrast so flat paint does not read as relief
-    return saturate((h - 0.5) * 1.6 + 0.5);
+    // a gentle contrast so flat paint does not read as relief
+    return saturate((h - 0.5) * 1.3 + 0.5);
+}
+
+// the spread of the luminance around uv at a coarse mip: large for stones, bricks and cracks, small for sand and grass
+float PomRange(sampler2D s, float2 uv, float lod, float d)
+{
+    float c = PomLum(tex2Dlod(s, float4(uv, 0.0, lod)));
+    float a = PomLum(tex2Dlod(s, float4(uv + float2(d, 0.0), 0.0, lod)));
+    float b = PomLum(tex2Dlod(s, float4(uv - float2(d, 0.0), 0.0, lod)));
+    float e = PomLum(tex2Dlod(s, float4(uv + float2(0.0, d), 0.0, lod)));
+    float f = PomLum(tex2Dlod(s, float4(uv - float2(0.0, d), 0.0, lod)));
+    return max(max(max(a, b), max(e, f)), c) - min(min(min(a, b), min(e, f)), c);
+}
+
+float PomContrast(float2 u0, float2 u1, float2 u2, float2 u3, float4 w, float4 lod)
+{
+    float r = 0.0;
+#if !ENV_LAYER0
+    [branch] if (w.x > 0.01) r = r + w.x * PomRange(sLayer0, u0, lod.x, 0.02);
+#endif
+#if LAYERS >= 2
+    [branch] if (w.y > 0.01) r = r + w.y * PomRange(sLayer1, u1, lod.y, 0.02);
+#endif
+#if LAYERS >= 3
+    [branch] if (w.z > 0.01) r = r + w.z * PomRange(sLayer2, u2, lod.z, 0.02);
+#endif
+#if LAYERS >= 4
+    [branch] if (w.w > 0.01) r = r + w.w * PomRange(sLayer3, u3, lod.w, 0.02);
+#endif
+    return smoothstep(0.05, 0.24, r);
 }
 
 // uv shift per yard along a world displacement e of the surface, for a layer whose coordinate derivatives are dux, duy,
@@ -533,14 +563,19 @@ void main(
 #endif
 
 
-    // ---- parallax occlusion mapping: the layer coordinates are shifted along the view ray to where it meets the height
-    // field. Position and normal come from HD_POS, the tangent frame from the screen derivatives, so the ADT format needs
-    // nothing new. pomS0..3 = uv shift of layer 0..3, pomShadow = 1 lit .. 0 shadowed by the relief itself.
+    // ---- parallax occlusion mapping: the layer coordinates are shifted along the view ray to where it meets a smooth
+    // height field, by an amount that follows how structured the surface is (stones and cracks get relief, sand and
+    // grass stay flat); the height field's slope gives a normal for sun shading and a glint. Position and normal come
+    // from HD_POS, the tangent frame from the screen derivatives, so the ADT format needs nothing new.
+    // pomS0..3 = uv shift of layer 0..3, pomShadow = 1 lit .. a little darker, pomBump = shading by the relief's
+    // normal, pomSpec = the sun's glint on it.
     float2 pomS0 = float2(0.0, 0.0);
     float2 pomS1 = float2(0.0, 0.0);
     float2 pomS2 = float2(0.0, 0.0);
     float2 pomS3 = float2(0.0, 0.0);
     float pomShadow = 1.0;
+    float pomBump = 1.0;
+    float pomSpec = 0.0;
 #if !ENV_LAYER0
     {
         float2 pU0 = iTex0.xy;
@@ -568,9 +603,9 @@ void main(
         float2 d2y = ddy(pU2);
         float2 d3x = ddx(pU3);
         float2 d3y = ddy(pU3);
-        // mip level per layer (the layer textures are 256 or 512 wide: 256 assumed, one level softer for the march)
+        // mip level per layer (the layer textures are 256 or 512 wide: 256 assumed)
         float4 pLod = 0.5 * log2(max(float4(dot(d0x, d0x) + dot(d0y, d0y), dot(d1x, d1x) + dot(d1y, d1y),
-                                            dot(d2x, d2x) + dot(d2y, d2y), dot(d3x, d3x) + dot(d3y, d3y)), 1.0e-12) * 32768.0) + 1.0;
+                                            dot(d2x, d2x) + dot(d2y, d2y), dot(d3x, d3x) + dot(d3y, d3y)), 1.0e-12) * 32768.0);
         pLod = max(pLod, 0.0);
         // the colour blend's weights per layer
         float4 pW = float4(1.0, 0.0, 0.0, 0.0);
@@ -594,29 +629,37 @@ void main(
         pW = float4(k1, k2 * pA.x, k3 * pA.y, pA.z);
 #endif
 #endif
-        float pFade = saturate((cHdPom.w - pDist) * (3.0 / max(cHdPom.w, 1.0)));
+        // cHdPom.x = 0 off, else 1 + the distance the fade starts at; cHdPom.w = the distance it ends at
+        float pStart = cHdPom.x - 1.0;
+        float pFade = saturate((cHdPom.w - pDist) / max(cHdPom.w - pStart, 1.0));
+        pFade = pFade * pFade * (3.0 - 2.0 * pFade);
         float3 pN = normalize(float3(iHdPos.w, iTex0.w, sqrt(saturate(1.0 - iHdPos.w * iHdPos.w - iTex0.w * iTex0.w))));
         float3 pV = -pP / max(pDist, 1.0e-4);
         float pNV = dot(pN, pV);
         [branch] if (cHdPom.x > 0.5 && pFade > 0.01 && pNV > 0.02) {
-            float depthYards = cHdPom.y * pFade;
-            float nv = max(pNV, 0.12);
+            float4 lodH = pLod + 1.5;   // blurred: the height
+            float4 lodC = pLod + 2.5;   // coarser still: the structure measure
+            float4 lodN = pLod + 0.75;  // crisper: the normal
+            float contrast = PomContrast(pU0, pU1, pU2, pU3, pW, lodC);
+            float depthYards = cHdPom.y * pFade * lerp(0.15, 1.0, contrast);
+            float nv = max(pNV, 0.2);
             float3 e = -(pV - pN * pNV) / nv;
             float2 D0 = PomShift(e, pDx, pDy, d0x, d0y);
             float2 D1 = PomShift(e, pDx, pDy, d1x, d1y);
             float2 D2 = PomShift(e, pDx, pDy, d2x, d2y);
             float2 D3 = PomShift(e, pDx, pDy, d3x, d3y);
-            float steps = clamp(cHdPom.z, 4.0, 16.0);
+            // fewer steps head-on, and fewer far away
+            float steps = clamp(cHdPom.z * (0.5 + 0.5 * (1.0 - pNV)) * (0.6 + 0.4 * pFade), 4.0, 16.0);
             float dt = 1.0 / steps;
             float tPrev = 0.0;
-            float dPrev = 1.0 - PomH(pU0, pU1, pU2, pU3, pW, pLod);
+            float dPrev = 1.0 - PomH(pU0, pU1, pU2, pU3, pW, lodH);
             float tHit = 1.0;
             float found = 0.0;
             [unroll] for (int i = 1; i <= 16; i++) {
                 [branch] if (found < 0.5 && float(i) <= steps) {
                     float t = float(i) * dt;
                     float d = t * depthYards;
-                    float dCur = (1.0 - PomH(pU0 + D0 * d, pU1 + D1 * d, pU2 + D2 * d, pU3 + D3 * d, pW, pLod)) - t;
+                    float dCur = (1.0 - PomH(pU0 + D0 * d, pU1 + D1 * d, pU2 + D2 * d, pU3 + D3 * d, pW, lodH)) - t;
                     [branch] if (dCur <= 0.0) {
                         tHit = tPrev + (t - tPrev) * (dPrev / max(dPrev - dCur, 1.0e-5));
                         found = 1.0;
@@ -631,24 +674,53 @@ void main(
             pomS2 = D2 * dHit;
             pomS3 = D3 * dHit;
 
-            // soft self-shadow: four taps from the hit point up the sun's ray
+            // the height field's slope at the hit point: a normal for the sun's shading and glint. Structured
+            // surfaces take it fully, smooth ones a little.
+            float3 pT = normalize(pDx - pN * dot(pDx, pN));
+            float3 pB = cross(pN, pT);
+            float eps = 0.07;
+            float2 tA0 = PomShift(pT * eps, pDx, pDy, d0x, d0y);
+            float2 tA1 = PomShift(pT * eps, pDx, pDy, d1x, d1y);
+            float2 tA2 = PomShift(pT * eps, pDx, pDy, d2x, d2y);
+            float2 tA3 = PomShift(pT * eps, pDx, pDy, d3x, d3y);
+            float2 bA0 = PomShift(pB * eps, pDx, pDy, d0x, d0y);
+            float2 bA1 = PomShift(pB * eps, pDx, pDy, d1x, d1y);
+            float2 bA2 = PomShift(pB * eps, pDx, pDy, d2x, d2y);
+            float2 bA3 = PomShift(pB * eps, pDx, pDy, d3x, d3y);
+            float hTp = PomH(pU0 + pomS0 + tA0, pU1 + pomS1 + tA1, pU2 + pomS2 + tA2, pU3 + pomS3 + tA3, pW, lodN);
+            float hTm = PomH(pU0 + pomS0 - tA0, pU1 + pomS1 - tA1, pU2 + pomS2 - tA2, pU3 + pomS3 - tA3, pW, lodN);
+            float hBp = PomH(pU0 + pomS0 + bA0, pU1 + pomS1 + bA1, pU2 + pomS2 + bA2, pU3 + pomS3 + bA3, pW, lodN);
+            float hBm = PomH(pU0 + pomS0 - bA0, pU1 + pomS1 - bA1, pU2 + pomS2 - bA2, pU3 + pomS3 - bA3, pW, lodN);
+            float bumpAmount = lerp(0.25, 1.0, contrast) * pFade;
+            float gain = 0.5 * cHdPom.y / eps * bumpAmount * 2.0;
+            float3 nP = normalize(pN - (hTp - hTm) * gain * pT - (hBp - hBm) * gain * pB);
+
             float3 pS = cHdPom2.xyz;
-            float nL = dot(pN, pS);
-            [branch] if (cHdPom2.w > 0.0 && nL > 0.08 && tHit > 0.02) {
-                float3 eL = (pS - pN * nL) / nL;
-                float2 L0 = PomShift(eL, pDx, pDy, d0x, d0y);
-                float2 L1 = PomShift(eL, pDx, pDy, d1x, d1y);
-                float2 L2 = PomShift(eL, pDx, pDy, d2x, d2y);
-                float2 L3 = PomShift(eL, pDx, pDy, d3x, d3y);
-                float occ = 0.0;
-                [unroll] for (int j = 1; j <= 4; j++) {
-                    float fr = float(j) * 0.25;
-                    float r = fr * dHit;
-                    float tRay = tHit * (1.0 - fr);
-                    float hs = PomH(pU0 + pomS0 + L0 * r, pU1 + pomS1 + L1 * r, pU2 + pomS2 + L2 * r, pU3 + pomS3 + L3 * r, pW, pLod);
-                    occ = max(occ, saturate((tRay - (1.0 - hs)) * 8.0));
+            [branch] if (dot(pS, pS) > 0.5) {
+                float nlV = dot(pN, pS);
+                float nlP = dot(nP, pS);
+                pomBump = lerp(1.0, clamp((nlP + 0.4) / (max(nlV, 0.0) + 0.4), 0.7, 1.3), bumpAmount);
+                float3 hv = normalize(pS + pV);
+                pomSpec = pow(saturate(dot(nP, hv)), 24.0) * step(0.0, nlP) * contrast * pFade * 0.3;
+
+                // gentle self-shadow: four taps from the hit point up the sun's ray, never darker than (1 - w)
+                float nL = nlV;
+                [branch] if (cHdPom2.w > 0.0 && nL > 0.1 && tHit > 0.02) {
+                    float3 eL = (pS - pN * nL) / nL;
+                    float2 L0 = PomShift(eL, pDx, pDy, d0x, d0y);
+                    float2 L1 = PomShift(eL, pDx, pDy, d1x, d1y);
+                    float2 L2 = PomShift(eL, pDx, pDy, d2x, d2y);
+                    float2 L3 = PomShift(eL, pDx, pDy, d3x, d3y);
+                    float occ = 0.0;
+                    [unroll] for (int j = 1; j <= 4; j++) {
+                        float fr = float(j) * 0.25;
+                        float r = fr * dHit;
+                        float tRay = tHit * (1.0 - fr);
+                        float hs = PomH(pU0 + pomS0 + L0 * r, pU1 + pomS1 + L1 * r, pU2 + pomS2 + L2 * r, pU3 + pomS3 + L3 * r, pW, lodH);
+                        occ = max(occ, saturate((tRay - (1.0 - hs)) * 4.0));
+                    }
+                    pomShadow = 1.0 - occ * cHdPom2.w * pFade * lerp(0.3, 1.0, contrast);
                 }
-                pomShadow = 1.0 - occ * cHdPom2.w * pFade;
             }
         }
     }
@@ -785,6 +857,7 @@ void main(
     [branch] if (cHdPs.z > 0.5) col = b.xyz * HdCombine((iDiffuse * f + iDirect.xyz * S) * 2.0, buffer);
     col = spec * S + col;
 #endif
+    col = col * pomBump + iDirect.xyz * (S * pomSpec * 2.0);
     float fog = iDirect.w;
     oColor = float4((col - cFogColor.xyz) * fog + cFogColor.xyz, 1.0);
     // HD: test view (hdTerrainLight 3): only the sun after the shadow, no texture, no ambient, no fog
@@ -821,6 +894,7 @@ void main(
     CVar* s_pomSamples = nullptr;
     CVar* s_pomDistance = nullptr;
     CVar* s_pomShadow = nullptr;
+    CVar* s_pomFadeStart = nullptr;
     float s_sunToLight[3] = { 0.0f, 0.0f, 0.0f };  // world direction to the sun (0 = none), set per frame by the chunk renderer
 
     // Our terrain shaders run in Azeroth Remastered (visuals 2) as hdTerrainLight says, and, so parallax works out of the
@@ -1045,10 +1119,11 @@ void HD::RegisterTerrainCVars() {
     s_ambient = OptionCVars::Register("hdLightAmbient", "HD: ambient strength on the ground in Forever lighting, 1 = Forever's (test only)", "1");
     s_hemi = OptionCVars::Register("hdTerrainHemi", "HD test: 1 = Forever hemisphere ambient, 0 = none (horizon = ground = sky), 2 = ratios frozen", "1");
     s_pom = OptionCVars::Register("terrainPOM", "HD: terrain parallax occlusion mapping, 0 = off, 1 = on", "1");
-    s_pomDepth = OptionCVars::Register("terrainPOMDepth", "HD: terrain parallax depth, in 8-yard texture tiles (0.045 = about 0.36 yards)", "0.045");
+    s_pomDepth = OptionCVars::Register("terrainPOMDepth", "HD: terrain parallax depth, in 8-yard texture tiles (0.018 = about 0.14 yards)", "0.018");
     s_pomSamples = OptionCVars::Register("terrainPOMSamples", "HD: terrain parallax ray steps at most, 4..16", "16");
-    s_pomDistance = OptionCVars::Register("terrainPOMDistance", "HD: terrain parallax fades out over the last third of this distance, yards", "85");
-    s_pomShadow = OptionCVars::Register("terrainPOMShadow", "HD: strength 0..1 of the relief's self-shadow from the sun", "0.6");
+    s_pomDistance = OptionCVars::Register("terrainPOMDistance", "HD: terrain parallax is gone at this distance, yards (it fades from terrainPOMFadeStart)", "55");
+    s_pomFadeStart = OptionCVars::Register("terrainPOMFadeStart", "HD: terrain parallax starts to fade out at this distance, yards", "25");
+    s_pomShadow = OptionCVars::Register("terrainPOMShadow", "HD: how much darker the relief's self-shadow makes the sun light, 0..0.3 (0.24 = never below 76%)", "0.24");
     s_info = CVar::Register("hdTerrainInfo", "HD: hdTerrainLight status (read only)", 0, "not started", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
 }
 
@@ -1150,14 +1225,14 @@ void HD::TerrainVertexConstants(const CAaSphere* sphere, CM2Scene* scene, const 
     // pixel c33, c34: parallax occlusion mapping (c16 + 1 + 4 * 4 = c33 is the first register after the lights)
     float pom[8];
     bool on = OptionCVars::Bool(s_pom, true);
-    pom[0] = on ? 1.0f : 0.0f;
-    pom[1] = OptionCVars::Float(s_pomDepth, 0.0f, 0.5f, 0.045f) * 8.0f;
+    pom[0] = on ? 1.0f + OptionCVars::Float(s_pomFadeStart, 0.0f, 500.0f, 25.0f) : 0.0f;
+    pom[1] = OptionCVars::Float(s_pomDepth, 0.0f, 0.5f, 0.018f) * 8.0f;
     pom[2] = OptionCVars::Float(s_pomSamples, 4.0f, 16.0f, 16.0f);
-    pom[3] = OptionCVars::Float(s_pomDistance, 5.0f, 1000.0f, 85.0f);
+    pom[3] = OptionCVars::Float(s_pomDistance, 5.0f, 1000.0f, 55.0f);
     pom[4] = s_sunToLight[0];
     pom[5] = s_sunToLight[1];
     pom[6] = s_sunToLight[2];
-    pom[7] = OptionCVars::Float(s_pomShadow, 0.0f, 1.0f, 0.6f);
+    pom[7] = OptionCVars::Float(s_pomShadow, 0.0f, 0.3f, 0.24f);
     g_theGxDevicePtr->ShaderConstantsSet(GxSh_Pixel, 33, pom, 2);
 }
 

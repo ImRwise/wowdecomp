@@ -230,7 +230,7 @@ void HD::Bloom::RegisterCVars() {
     if (s_bloom) return;
     s_bloom = OptionCVars::Register("hdBloom", "HD: bright world halos", "1");
     s_strength = OptionCVars::Register("hdBloomStrength", "HD: halo strength 0..5", "1");
-    s_threshold = OptionCVars::Register("hdBloomThreshold", "HD: bright threshold 0..1", "0.7");
+    s_threshold = OptionCVars::Register("hdBloomThreshold", "HD: bright threshold 0..1, of luma", "0.82");
     s_rays = OptionCVars::Register("hdRays", "HD: sun rays", "1");
     s_rayStrength = OptionCVars::Register("hdRaysStrength", "HD: rays strength 0..5", "1");
     s_aliasBloom = OptionCVars::Register("hdrBloom", "HD: bloom on/off (same as hdBloom; both must be on)", "1");
@@ -262,7 +262,7 @@ void HD::Bloom::World() {
     }
     State& st = s_state;
     const float strength = OptionCVars::Float(s_strength, 0.0f, 5.0f, 1.0f) * OptionCVars::Float(s_aliasBloomStrength, 0.0f, 5.0f, 0.45f) / 0.45f;
-    const float threshold = OptionCVars::Float(s_threshold, 0.0f, 1.0f, 0.7f);
+    const float threshold = OptionCVars::Float(s_threshold, 0.0f, 1.0f, 0.82f);
     const float rayStrength = OptionCVars::Float(s_rayStrength, 0.0f, 5.0f, 1.0f) * OptionCVars::Float(s_aliasRayStrength, 0.0f, 5.0f, 0.65f) / 0.65f;
     const int32_t debug = OptionCVars::Int(s_debug, 0, 3, 0);
 

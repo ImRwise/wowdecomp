@@ -26,7 +26,7 @@ void main()
     vec3 color;
 #if BLOOM_PASS == 1
     vec3 c = Box4(uv, pc.a.xy);
-    float l = max(c.r, max(c.g, c.b));
+    float l = dot(c, vec3(.2126, .7152, .0722));   // luma, so saturated mid-bright ground (orange dirt) does not glow
     float k = pc.b.y;
     float soft = clamp(l - pc.b.x + k, 0.0, 2.0 * k);
     soft = soft * soft / (4.0 * k + 1e-4);
@@ -45,7 +45,7 @@ void main()
     float sky = (raw >= .99999 || zv >= pc.b.y * .98) ? 1.0 : 0.0;
     vec3 c = T0(uv);
     float fall = clamp(1.0 - length((uv - pc.a.xy) * vec2(pc.a.z, 1)) / pc.a.w, 0.0, 1.0);
-    float l = max(c.r, max(c.g, c.b));
+    float l = dot(c, vec3(.2126, .7152, .0722));   // luma, so saturated mid-bright ground (orange dirt) does not glow
     float b = clamp((l - pc.b.x) / max(1.0 - pc.b.x, 1e-3), 0.0, 1.0);
     color = c * (sky * fall * fall * (.25 + .75 * b));
 #elif BLOOM_PASS == 5

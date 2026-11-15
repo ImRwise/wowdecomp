@@ -823,6 +823,16 @@ void main(
     CVar* s_pomShadow = nullptr;
     float s_sunToLight[3] = { 0.0f, 0.0f, 0.0f };  // world direction to the sun (0 = none), set per frame by the chunk renderer
 
+    // Our terrain shaders run in Azeroth Remastered (visuals 2) as hdTerrainLight says, and, so parallax works out of the
+    // box, in Lumenveil (visuals 1) while terrainPOM is on, then with 3.3.5's own lighting (mode 2: it must look like
+    // Blizzard's shaders). Stock (visuals 0) gets nothing.
+    int32_t TerrainMode() {
+        const Visuals::Mode visuals = Visuals::Current();
+        if (visuals == Visuals::AzerothRemastered) return OptionCVars::Int(s_light, 0, 3, 1);
+        if (visuals == Visuals::Lumenveil && OptionCVars::Bool(s_pom, true)) return 2;
+        return 0;
+    }
+
     float Clamp(float v, float lo, float hi) {
         return v < lo ? lo : (v > hi ? hi : v);
     }
@@ -1053,7 +1063,7 @@ void HD::TerrainShader(CGxShader* shader, int32_t kind, int32_t permutation) {
     int32_t state = s_state.load();
     ShowState(state);
 
-    bool want = state == StateReady && Visuals::Current() == Visuals::AzerothRemastered && OptionCVars::Bool(s_light, true);
+    bool want = state == StateReady && TerrainMode() != 0;
     static bool s_offered = false;
     if (want && !s_offered) {
         // Once: every permutation the device lacks goes to hd-pending, so one install covers the whole terrain.
@@ -1105,11 +1115,11 @@ void HD::TerrainShader(CGxShader* shader, int32_t kind, int32_t permutation) {
 }
 
 void HD::TerrainVertexConstants(const CAaSphere* sphere, CM2Scene* scene, const C3Vector* camera) {
-    if (!g_theGxDevicePtr || Visuals::Current() != Visuals::AzerothRemastered) return;
+    if (!g_theGxDevicePtr || TerrainMode() == 0) return;
     RefreshHemisphere();
 
     float constants[20] = {};
-    int32_t mode = OptionCVars::Int(s_light, 0, 3, 1);
+    int32_t mode = TerrainMode();
     constants[2] = mode == 1 || mode == 3 ? 1.0f : 0.0f;  // Forever lighting
     constants[3] = mode == 3 ? 1.0f : 0.0f;              // test view
     constants[4] = Clamp(s_ambient ? s_ambient->m_floatValue : 1.0f, 0.0f, 2.0f);
@@ -1139,7 +1149,7 @@ void HD::TerrainVertexConstants(const CAaSphere* sphere, CM2Scene* scene, const 
 
     // pixel c33, c34: parallax occlusion mapping (c16 + 1 + 4 * 4 = c33 is the first register after the lights)
     float pom[8];
-    bool on = OptionCVars::Bool(s_pom, true) && Visuals::Current() == Visuals::AzerothRemastered;
+    bool on = OptionCVars::Bool(s_pom, true);
     pom[0] = on ? 1.0f : 0.0f;
     pom[1] = OptionCVars::Float(s_pomDepth, 0.0f, 0.5f, 0.045f) * 8.0f;
     pom[2] = OptionCVars::Float(s_pomSamples, 4.0f, 16.0f, 16.0f);

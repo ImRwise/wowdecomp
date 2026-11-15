@@ -18,8 +18,9 @@ Vulkan only draws the world with the real shaders when `VulkanShaders\manifest.t
 
 Ray-marches the terrain's layer textures against a smooth height field (their luminance at a blurred mip, so grain such as
 sand does not become spikes, blended with the layers' own alpha weights). The relief is weighted by how structured the
-surface is: stones, bricks and cracks get depth, sand and grass stay flat. The height field's slope also gives a normal for
-the sun's shading and a faint glint, and a gentle self-shadow toward the sun that never darkens the sun light below 76%. The tangent frame comes from screen derivatives, so no
+surface is: stones, bricks and cracks get depth, sand and grass stay flat. The height field's slope, read at full texture resolution, also gives a normal for
+the sun's shading and a glint on edges, crevices get a soft occlusion (never below 0.68), and there is a gentle self-shadow toward
+the sun that never darkens the sun light below 76%. The tangent frame comes from screen derivatives, so no
 ADT change is needed. It runs in our terrain shaders: with `visuals 2` as `hdTerrainLight` says (1 Forever lighting, 2 and 3 as
 described in `HdTerrain.h`, 0 Blizzard's shaders and so no parallax), and with `visuals 1` (Lumenveil, the default) whenever
 `terrainPOM` is on, then with 3.3.5's own lighting. `visuals 0` (stock) draws nothing extra.
@@ -27,8 +28,8 @@ described in `HdTerrain.h`, 0 Blizzard's shaders and so no parallax), and with `
 | CVar | Default | Meaning |
 | --- | --- | --- |
 | `terrainPOM` | `1` | 0 off, 1 on |
-| `terrainPOMDepth` | `0.018` | depth in 8-yard texture tiles (0.018 is about 0.14 yards) |
-| `terrainPOMSamples` | `16` | ray steps at most, 4..16 |
+| `terrainPOMDepth` | `0.042` | depth in 8-yard texture tiles (0.042 is about 0.34 yards) |
+| `terrainPOMSamples` | `20` | ray steps at most, 4..24 |
 | `terrainPOMFadeStart` | `25` | yards; the effect starts to fade here |
 | `terrainPOMDistance` | `55` | yards; the effect is gone here, nothing is done beyond |
 | `terrainPOMShadow` | `0.24` | 0..0.3, how much the relief's self-shadow darkens the sun light (0.24 = never below 76%) |
@@ -53,7 +54,7 @@ both of its names are on, and the strengths multiply, with each name's own defau
 | `hdrBloom` | `1` | `hdBloom` |
 | `hdrBloomIntensity` | `0.45` | `hdBloomStrength` (default 1) |
 
-`hdBloomThreshold` (0..1, 0.82, measured on luma so saturated ground does not glow) sets how bright a pixel must be to glow; `hdBloomDebug` 1 mask, 2 rays, 3 halo.
+`hdBloomThreshold` (0..1.5, default 0.92, measured on luma so saturated ground does not glow; the picture tops out at 1, so above it only the soft knee blooms) sets how bright a pixel must be to glow; defaults `hdBloomStrength` 0.6, `hdRaysStrength` 0.5. The ray mask takes only unoccluded sky in a tight cone round the sun and tints the shafts with the sun's colour (gold low, pale warm overhead), never the sky's or the foliage's hue; Lumenveil's own shafts carry the sky's brightness only; `hdBloomDebug` 1 mask, 2 rays, 3 halo.
 
 ## D3D11 effects
 

@@ -43,5 +43,7 @@ float4 main(float2 rayTexel : VPOS) : COLOR0
     float3 scene = tex2Dlod(sDownsampledScene, float4((rayTexel + 0.5) * RayTexelSize(), 0, 0)).rgb;
     float luminance = dot(scene, kLumaWeights);
     float brightSky = skyMask * sunFalloff * saturate((luminance - LuminanceThreshold()) * kThresholdRampSlope);
-    return float4(scene * brightSky, 1);
+    // Port: the shafts carry the sky's brightness, not its hue (the composite tints them with the sun's colour), so a purple or
+    // pink sky does not smear purple across the picture.
+    return float4(lerp(luminance.xxx, scene, 0.2) * brightSky, 1);
 }

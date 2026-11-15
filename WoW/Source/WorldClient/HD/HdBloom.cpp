@@ -31,6 +31,7 @@ namespace {
         float a[4];
         float b[4];
         float c[4];
+        float d[4];   // the sun's light colour, for the ray mask
     };
 
     // Where the sun is on screen and how to tell the sky in the depth copy.
@@ -229,10 +230,10 @@ namespace {
 void HD::Bloom::RegisterCVars() {
     if (s_bloom) return;
     s_bloom = OptionCVars::Register("hdBloom", "HD: bright world halos", "1");
-    s_strength = OptionCVars::Register("hdBloomStrength", "HD: halo strength 0..5", "1");
-    s_threshold = OptionCVars::Register("hdBloomThreshold", "HD: bright threshold 0..1, of luma", "0.82");
+    s_strength = OptionCVars::Register("hdBloomStrength", "HD: halo strength 0..5", "0.6");
+    s_threshold = OptionCVars::Register("hdBloomThreshold", "HD: bright threshold of luma (0..1.5; the picture tops out at 1, so above it only the knee blooms)", "0.92");
     s_rays = OptionCVars::Register("hdRays", "HD: sun rays", "1");
-    s_rayStrength = OptionCVars::Register("hdRaysStrength", "HD: rays strength 0..5", "1");
+    s_rayStrength = OptionCVars::Register("hdRaysStrength", "HD: rays strength 0..5", "0.5");
     s_aliasBloom = OptionCVars::Register("hdrBloom", "HD: bloom on/off (same as hdBloom; both must be on)", "1");
     s_aliasBloomStrength = OptionCVars::Register("hdrBloomIntensity", "HD: bloom intensity, default 0.45 (multiplies hdBloomStrength)", "0.45");
     s_aliasRays = OptionCVars::Register("sunShafts", "HD: sun shafts on/off (same as hdRays; both must be on)", "1");
@@ -261,9 +262,9 @@ void HD::Bloom::World() {
         return;
     }
     State& st = s_state;
-    const float strength = OptionCVars::Float(s_strength, 0.0f, 5.0f, 1.0f) * OptionCVars::Float(s_aliasBloomStrength, 0.0f, 5.0f, 0.45f) / 0.45f;
-    const float threshold = OptionCVars::Float(s_threshold, 0.0f, 1.0f, 0.82f);
-    const float rayStrength = OptionCVars::Float(s_rayStrength, 0.0f, 5.0f, 1.0f) * OptionCVars::Float(s_aliasRayStrength, 0.0f, 5.0f, 0.65f) / 0.65f;
+    const float strength = OptionCVars::Float(s_strength, 0.0f, 5.0f, 0.6f) * OptionCVars::Float(s_aliasBloomStrength, 0.0f, 5.0f, 0.45f) / 0.45f;
+    const float threshold = OptionCVars::Float(s_threshold, 0.0f, 1.5f, 0.92f);
+    const float rayStrength = OptionCVars::Float(s_rayStrength, 0.0f, 5.0f, 0.5f) * OptionCVars::Float(s_aliasRayStrength, 0.0f, 5.0f, 0.65f) / 0.65f;
     const int32_t debug = OptionCVars::Int(s_debug, 0, 3, 0);
 
     const DayNight::DNInfo& dn = DayNight::g_dnInfo;
@@ -292,12 +293,16 @@ void HD::Bloom::World() {
         ok = ok && Run(Down, 3, st.images[1], st.images[1], st.images[1], c) && BlurImage(3, 1, c) && BlurImage(3, 2, c);
     }
     if (ok && rays) {
-        Set(c.a, post.u, post.v, float(width) / height, .6f);
+        // the sun's light: deep gold when it is low, a pale warm white overhead (the moon's silver-blue is Lumenveil's)
+        const float sunLen = std::sqrt(sun[0] * sun[0] + sun[1] * sun[1] + sun[2] * sun[2]);
+        const float high = Sat(sunLen > 1e-3f ? sun[2] / sunLen * 2.0f : 0.5f);
+        Set(c.d, 1.0f + (1.0f - 1.0f) * high, 0.62f + (0.90f - 0.62f) * high, 0.30f + (0.70f - 0.30f) * high);
+        Set(c.a, post.u, post.v, float(width) / height, .35f);
         Set(c.b, .5f, post.farClip);
         Set(c.c, post.minDepth, post.maxDepth, post.c2, post.d2);
         ok = Run(RayMask, 5, st.images[0], st.depth, st.images[0], c, true);
         Set(c.a, post.u, post.v, .9f, .97f);
-        Set(c.b, 1.5f);
+        Set(c.b, 1.0f);
         ok = ok && Run(Radial, 6, st.images[5], st.images[5], st.images[5], c);
     }
     const uint32_t halo = bloom ? 1 : 6;

@@ -5,6 +5,8 @@
 #include "Engine/Source/Gx/CGxPool.h"
 #include "Engine/Source/Gx/CGxTex.h"
 #include "Engine/Source/Gx/Gx.h"
+#include "Engine/Source/Gx/GxEffects.h"
+#include "Engine/Source/Gx/CGxDeviceD3d11/CGxD3d11Effects.h"
 
 template <class T>
 static void Rel(T*& p) {
@@ -116,6 +118,11 @@ ID3D11DepthStencilState* CGxDeviceD3d11::IGetDepthState() {
 
     if (this->m_appMasterEnables & 0x8) {
         write = this->m_appRenderStates[GxRs_DepthWrite].m_value.m_data.i[0] != 0;
+    }
+
+    // Not in the original binary: Lumenveil's liquid pass writes depth whatever the client's state says (GxEffects::ForceDepthWrite)
+    if (GxEffects::DepthWriteForced()) {
+        write = 1;
     }
 
     static const bool s_noDepth = GetEnvironmentVariableA("WOW_D3D11_NODEPTH", nullptr, 0) != 0;
@@ -394,6 +401,11 @@ void CGxDeviceD3d11::IBindTextures() {
         CGxTex* texId = static_cast<CGxTex*>(this->m_appRenderStates[GxRs_Texture0 + i].m_value.m_data.p);
         srvs[i] = nullptr;
         samplers[i] = nullptr;
+
+        // Not in the original binary: a texture an HD material put on this stage (GxEffects::SetDrawTexture)
+        if (D3d11EffectsDrawTexture(i, srvs[i], samplers[i])) {
+            continue;
+        }
 
         if (!texId) {
             continue;

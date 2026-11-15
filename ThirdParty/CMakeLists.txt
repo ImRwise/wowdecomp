@@ -204,3 +204,22 @@ if (WIN32)
             ${CMAKE_SOURCE_DIR}
     )
 endif ()
+
+if (WIN32)
+    # SPIRV-Cross (Apache-2.0, vulkan-sdk-1.4.341.0), the HLSL backend only: the D3D11 backend turns GxEffects' SPIR-V
+    # programs into HLSL with it (Engine/Source/Gx/CGxDeviceD3d11/SpirvToHlsl.cpp).
+    add_library(spirv_cross_hlsl STATIC
+        spirv-cross/spirv_cfg.cpp
+        spirv-cross/spirv_cross.cpp
+        spirv-cross/spirv_cross_parsed_ir.cpp
+        spirv-cross/spirv_cross_util.cpp
+        spirv-cross/spirv_glsl.cpp
+        spirv-cross/spirv_hlsl.cpp
+        spirv-cross/spirv_parser.cpp
+    )
+
+    target_include_directories(spirv_cross_hlsl
+        PUBLIC
+            ${CMAKE_SOURCE_DIR}
+    )
+endif ()

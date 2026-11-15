@@ -26,6 +26,10 @@ target_link_libraries(Gx
 )
 
 if (WIN32)
+    target_link_libraries(Gx PRIVATE spirv_cross_hlsl)
+endif ()
+
+if (WIN32)
     add_subdirectory(CGxDeviceVulkan)
 
     target_link_libraries(Gx

@@ -67,6 +67,7 @@ class CGxDeviceD3d11 : public CGxDevice {
     struct DepthTarget {
         ID3D11Texture2D* m_texture = nullptr;
         ID3D11DepthStencilView* m_dsv = nullptr;
+        ID3D11ShaderResourceView* m_srv = nullptr;   // the default depth buffer only (GxEffects::CopyDepth reads it)
         uint32_t m_width = 0;
         uint32_t m_height = 0;
     };
@@ -225,6 +226,7 @@ class CGxDeviceD3d11 : public CGxDevice {
     int32_t ICreateSwapChain(const CGxFormat& format);
     int32_t ICreateTargets();
     void IReleaseTargets();
+    void IInvalidateStateCaches();   // after something else (GxEffects) used the pipeline: every cached binding is forgotten
     void IDestroyD3d();
     void ISetCaps(const CGxFormat& format);
     void ISetWindowFocus(int32_t focus);

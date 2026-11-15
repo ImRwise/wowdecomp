@@ -124,7 +124,8 @@ void main(){
                 // cannot occlude it. A 0.2%-radius surface tolerance rejects D32/rounding self-noise.
                 if(dot(normal,delta)<=max(c.params.x*.002,z*.00002))continue;
                 float weight=sat(distanceWorld*falloffMul+falloffAdd),h=dot(delta/distanceWorld,viewVec);
-                horizon[side]=max(horizon[side],mix(low[side],h,weight));}
+                // HD: no dynamic index of a vector (HLSL cannot write one in a loop the compiler does not unroll)
+                if(side==0)horizon.x=max(horizon.x,mix(low.x,h,weight));else horizon.y=max(horizon.y,mix(low.y,h,weight));}
         }
         len=mix(len,1.0,.05);float h0=-XeACos(horizon.y),h1=XeACos(horizon.x);
         float arc0=(cosNorm+2*h0*sin(n)-cos(2*h0-n))*.25,arc1=(cosNorm+2*h1*sin(n)-cos(2*h1-n))*.25;

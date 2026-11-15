@@ -571,6 +571,7 @@ void CGxDeviceD3d11::IReleaseTargets() {
     Rel(this->m_backBuffer);
     Rel(this->m_msaaColorRtv);
     Rel(this->m_msaaColor);
+    Rel(this->m_defDepth.m_srv);
     Rel(this->m_defDepth.m_dsv);
     Rel(this->m_defDepth.m_texture);
     Rel(this->m_scratchDepth.m_dsv);
@@ -629,15 +630,37 @@ int32_t CGxDeviceD3d11::ICreateTargets() {
     depth.Height = desc.Height;
     depth.MipLevels = 1;
     depth.ArraySize = 1;
-    depth.Format = this->m_depthFormat;
+    // Typeless, so the effects can sample it too (GxEffects::CopyDepth); the depth view keeps the real format.
+    DXGI_FORMAT srvFormat = DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
+    depth.Format = DXGI_FORMAT_R24G8_TYPELESS;
+
+    if (this->m_depthFormat == DXGI_FORMAT_D32_FLOAT) {
+        depth.Format = DXGI_FORMAT_R32_TYPELESS;
+        srvFormat = DXGI_FORMAT_R32_FLOAT;
+    } else if (this->m_depthFormat == DXGI_FORMAT_D16_UNORM) {
+        depth.Format = DXGI_FORMAT_R16_TYPELESS;
+        srvFormat = DXGI_FORMAT_R16_UNORM;
+    }
+
     depth.SampleDesc.Count = this->m_sampleCount;
     depth.SampleDesc.Quality = this->m_sampleQuality;
     depth.Usage = D3D11_USAGE_DEFAULT;
-    depth.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+    depth.BindFlags = D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE;
 
-    if (FAILED(this->m_d3dDevice->CreateTexture2D(&depth, nullptr, &this->m_defDepth.m_texture)) || FAILED(this->m_d3dDevice->CreateDepthStencilView(this->m_defDepth.m_texture, nullptr, &this->m_defDepth.m_dsv))) {
+    D3D11_DEPTH_STENCIL_VIEW_DESC dsvDesc = {};
+    dsvDesc.Format = this->m_depthFormat;
+    dsvDesc.ViewDimension = this->m_sampleCount > 1 ? D3D11_DSV_DIMENSION_TEXTURE2DMS : D3D11_DSV_DIMENSION_TEXTURE2D;
+
+    if (FAILED(this->m_d3dDevice->CreateTexture2D(&depth, nullptr, &this->m_defDepth.m_texture)) || FAILED(this->m_d3dDevice->CreateDepthStencilView(this->m_defDepth.m_texture, &dsvDesc, &this->m_defDepth.m_dsv))) {
         return 0;
     }
+
+    D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+    srvDesc.Format = srvFormat;
+    srvDesc.ViewDimension = this->m_sampleCount > 1 ? D3D11_SRV_DIMENSION_TEXTURE2DMS : D3D11_SRV_DIMENSION_TEXTURE2D;
+    srvDesc.Texture2D.MipLevels = 1;
+    // optional: without it GxEffects has no depth to copy
+    this->m_d3dDevice->CreateShaderResourceView(this->m_defDepth.m_texture, &srvDesc, &this->m_defDepth.m_srv);
 
     this->m_defDepth.m_width = desc.Width;
     this->m_defDepth.m_height = desc.Height;
@@ -1174,6 +1197,25 @@ CGxDeviceD3d11::DepthTarget* CGxDeviceD3d11::IGetScratchDepth(uint32_t width, ui
     d.m_width = width;
     d.m_height = height;
     return &d;
+}
+
+// Forgets every binding the device caches (the effects change them behind its back): the next draw sets them all again.
+void CGxDeviceD3d11::IInvalidateStateCaches() {
+    this->m_curBlend = nullptr;
+    this->m_curDepth = nullptr;
+    this->m_curRaster = nullptr;
+    this->m_curLayout = nullptr;
+    this->m_curVs = nullptr;
+    this->m_curPs = nullptr;
+    this->m_curIndexBuffer = nullptr;
+    this->m_curTopology = D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED;
+    memset(this->m_curVertexBuffers, 0, sizeof(this->m_curVertexBuffers));
+    memset(this->m_curSrvs, 0, sizeof(this->m_curSrvs));
+    memset(this->m_curSamplers, 0, sizeof(this->m_curSamplers));
+    this->m_curBlendFactor = -1.0f;
+    this->m_targetsDirty = 1;
+    this->m_viewportDirty = 1;
+    this->m_scissorRectDirty = 1;
 }
 
 // Chooses and binds the current colour / depth views from the Gx render target state.

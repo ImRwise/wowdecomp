@@ -172,8 +172,19 @@ void SetDrawTexture(uint32_t stage, Texture* texture, bool linear = false, bool 
 void ForceDepthWrite(bool on);
 bool DepthWriteForced();
 
+// What SetDrawTexture last set for a stage of the engine's draws (stage < kMaxTextures), for the backends' draw paths.
+struct DrawOverride {
+    Texture* texture = nullptr;
+    bool linear = false;
+    bool wrap = false;
+    bool mips = false;
+};
+const DrawOverride& DrawOverrideFor(uint32_t stage);
 // The active backend's device, or null when it has none (or it is not up yet).
 Device* Get();
+// Each backend's own device (GxEffects.cpp's Get() asks them in turn): Vulkan in GxVulkan, D3D11 in Gx.
+Device* VulkanDevice();
+Device* D3d11Device();
 
 }
 

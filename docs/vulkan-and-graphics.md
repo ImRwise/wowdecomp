@@ -55,10 +55,22 @@ both of its names are on, and the strengths multiply, with each name's own defau
 
 `hdBloomThreshold` (0..1, 0.82, measured on luma so saturated ground does not glow) sets how bright a pixel must be to glow; `hdBloomDebug` 1 mask, 2 rays, 3 halo.
 
+## D3D11 effects
+
+The D3D11 backend (`-d3d11`) implements `GxEffects` too, so bloom, sun shafts, fog, water, AO, GI and Lumenveil's passes can
+run on it. The effect programs are the SPIR-V modules the Vulkan backend uses; D3D11 turns each into Shader Model 5 HLSL with
+SPIRV-Cross (`ThirdParty/spirv-cross`, Apache-2.0) when the effect first creates it, and keeps the compiled result in
+`Cache\D3d11Effects` beside the exe (delete the folder to rebuild it). The first start with the effects on spends a few seconds
+compiling the compute shaders. Terrain parallax needs nothing: D3D11 compiles `HdTerrain`'s HLSL itself.
+
+What it needs from the device: the default depth buffer is typeless and sampleable (a multisampled one is read through sample 0),
+effect textures can be unordered-access targets, and `GxEffects::SetDrawTexture` / `ForceDepthWrite` reach the engine's own draws.
+
 ## Status
 
-- Done: terrain POM (luminance height), aliases above.
+- Done: terrain POM (luminance height), aliases above, D3D11 `GxEffects` (builds; **not yet run in game**: the first test on D3D11
+  may show problems in the passes, `Logs\d3d11.log` lines starting `GxEffects:` say what failed).
+- Offline check: all 71 effect programs convert to HLSL and compile for SM5.
 - Not done yet: MSAA in the Vulkan backend (it renders at one sample; the effects sample the scene mid-frame, so a resolve
-  is needed at each of those points), `GxEffects` on D3D11 (bloom, shafts, fog and water are Vulkan-only), `_h.blp` height
-  textures and a per-pixel specular (the retail ADT adapter does not read MHID, and the chunk renderer binds no extra terrain
-  sampler), automatic translation of `VulkanShaders` in the CMake build.
+  is needed at each of those points), `_h.blp` height textures and a per-pixel specular (the retail ADT adapter does not read MHID,
+  and the chunk renderer binds no extra terrain sampler), automatic translation of `VulkanShaders` in the CMake build.

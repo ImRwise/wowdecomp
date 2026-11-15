@@ -295,6 +295,9 @@ float4 cHdLight[16]  : register(c17); // HD lights, 4 registers each (HdLights.h
                                       //  2: rgb = colour B (far),  w = 1 / (attenuation end - start)
                                       //  3: x, y = colour blend t = saturate(d * x + y), z = cut radius, w = 1 / cut fade width
 
+float4 cHdPom        : register(c33); // POM: x = on, y = depth in yards, z = ray steps (4..16), w = fade distance in yards
+float4 cHdPom2       : register(c34); // POM: xyz = world direction to the sun, w = self-shadow strength (0 = off)
+
 #if ENV_LAYER0
 samplerCUBE sLayer0  : register(s0);
 #else
@@ -403,6 +406,48 @@ float3 HdCombine(float3 light, float3 buffer)
     return pow(pow(max(light, 0.0), 2.2) + buffer, 1.0 / 2.2);
 }
 
+// Terrain parallax occlusion mapping. The height of a pixel is the luminance of the layer textures, blended by the layer
+// weights w (the same weights the colour blend ends up with); u0..u3 are the layers' texture coordinates already shifted,
+// lod the mip level to read. Layers that are not there, or weigh nothing, cost no fetch.
+float PomLum(float4 c)
+{
+    return dot(c.rgb, float3(0.299, 0.587, 0.114));
+}
+
+float PomH(float2 u0, float2 u1, float2 u2, float2 u3, float4 w, float4 lod)
+{
+    float h = 0.0;
+#if !ENV_LAYER0
+    [branch] if (w.x > 0.01) h = h + w.x * PomLum(tex2Dlod(sLayer0, float4(u0, 0.0, lod.x)));
+#endif
+#if LAYERS >= 2
+    [branch] if (w.y > 0.01) h = h + w.y * PomLum(tex2Dlod(sLayer1, float4(u1, 0.0, lod.y)));
+#endif
+#if LAYERS >= 3
+    [branch] if (w.z > 0.01) h = h + w.z * PomLum(tex2Dlod(sLayer2, float4(u2, 0.0, lod.z)));
+#endif
+#if LAYERS >= 4
+    [branch] if (w.w > 0.01) h = h + w.w * PomLum(tex2Dlod(sLayer3, float4(u3, 0.0, lod.w)));
+#endif
+    // a little contrast so flat paint does not read as relief
+    return saturate((h - 0.5) * 1.6 + 0.5);
+}
+
+// uv shift per yard along a world displacement e of the surface, for a layer whose coordinate derivatives are dux, duy,
+// where the position derivatives are dpx, dpy: e = a dpx + b dpy, shift = a dux + b duy
+float2 PomShift(float3 e, float3 dpx, float3 dpy, float2 dux, float2 duy)
+{
+    float g11 = dot(dpx, dpx);
+    float g12 = dot(dpx, dpy);
+    float g22 = dot(dpy, dpy);
+    float det = max(g11 * g22 - g12 * g12, 1.0e-10);
+    float r1 = dot(e, dpx);
+    float r2 = dot(e, dpy);
+    float a = (r1 * g22 - r2 * g12) / det;
+    float b = (r2 * g11 - r1 * g12) / det;
+    return dux * a + duy * b;
+}
+
 void main(
     float3 iDiffuse : COLOR0,
     float3 iSpecular : COLOR1,
@@ -471,21 +516,7 @@ void main(
 #endif
 #endif
 
-    // ---- layer textures
-#if ENV_LAYER0
-    float4 t0 = texCUBE(sLayer0, iTex0.xyz);
-#else
-    float4 t0 = tex2D(sLayer0, iTex0.xy);
-#endif
-#if LAYERS >= 2
-    float4 t1 = tex2D(sLayer1, uv1);
-#endif
-#if LAYERS >= 3
-    float4 t2 = tex2D(sLayer2, uv2);
-#endif
-#if LAYERS >= 4
-    float4 t3 = tex2D(sLayer3, uv3);
-#endif
+    // ---- blend weights texture
 #if SAMPLE_BLEND
 #if LAYERS == 1
     float4 a = tex2D(sBlend, uv1);
@@ -499,6 +530,144 @@ void main(
 #if LAYERS == 4
     float4 a = tex2D(sBlend, uv4);
 #endif
+#endif
+
+
+    // ---- parallax occlusion mapping: the layer coordinates are shifted along the view ray to where it meets the height
+    // field. Position and normal come from HD_POS, the tangent frame from the screen derivatives, so the ADT format needs
+    // nothing new. pomS0..3 = uv shift of layer 0..3, pomShadow = 1 lit .. 0 shadowed by the relief itself.
+    float2 pomS0 = float2(0.0, 0.0);
+    float2 pomS1 = float2(0.0, 0.0);
+    float2 pomS2 = float2(0.0, 0.0);
+    float2 pomS3 = float2(0.0, 0.0);
+    float pomShadow = 1.0;
+#if !ENV_LAYER0
+    {
+        float2 pU0 = iTex0.xy;
+        float2 pU1 = float2(0.0, 0.0);
+        float2 pU2 = float2(0.0, 0.0);
+        float2 pU3 = float2(0.0, 0.0);
+#if LAYERS >= 2
+        pU1 = uv1;
+#endif
+#if LAYERS >= 3
+        pU2 = uv2;
+#endif
+#if LAYERS >= 4
+        pU3 = uv3;
+#endif
+        float3 pP = iHdPos.xyz;
+        float pDist = length(pP);
+        float3 pDx = ddx(pP);
+        float3 pDy = ddy(pP);
+        float2 d0x = ddx(pU0);
+        float2 d0y = ddy(pU0);
+        float2 d1x = ddx(pU1);
+        float2 d1y = ddy(pU1);
+        float2 d2x = ddx(pU2);
+        float2 d2y = ddy(pU2);
+        float2 d3x = ddx(pU3);
+        float2 d3y = ddy(pU3);
+        // mip level per layer (the layer textures are 256 or 512 wide: 256 assumed, one level softer for the march)
+        float4 pLod = 0.5 * log2(max(float4(dot(d0x, d0x) + dot(d0y, d0y), dot(d1x, d1x) + dot(d1y, d1y),
+                                            dot(d2x, d2x) + dot(d2y, d2y), dot(d3x, d3x) + dot(d3y, d3y)), 1.0e-12) * 32768.0) + 1.0;
+        pLod = max(pLod, 0.0);
+        // the colour blend's weights per layer
+        float4 pW = float4(1.0, 0.0, 0.0, 0.0);
+#if SAMPLE_BLEND
+        float3 pA = float3(0.0, 0.0, 0.0);
+#if LAYERS >= 2
+        pA.x = a.x;
+#endif
+#if LAYERS >= 3
+        pA.y = a.y;
+#endif
+#if LAYERS >= 4
+        pA.z = a.z;
+#endif
+#if BIG_ALPHA
+        pW = float4(1.0 - saturate(pA.x + pA.y + pA.z), pA.x, pA.y, pA.z);
+#else
+        float k3 = 1.0 - pA.z;
+        float k2 = k3 * (1.0 - pA.y);
+        float k1 = k2 * (1.0 - pA.x);
+        pW = float4(k1, k2 * pA.x, k3 * pA.y, pA.z);
+#endif
+#endif
+        float pFade = saturate((cHdPom.w - pDist) * (3.0 / max(cHdPom.w, 1.0)));
+        float3 pN = normalize(float3(iHdPos.w, iTex0.w, sqrt(saturate(1.0 - iHdPos.w * iHdPos.w - iTex0.w * iTex0.w))));
+        float3 pV = -pP / max(pDist, 1.0e-4);
+        float pNV = dot(pN, pV);
+        [branch] if (cHdPom.x > 0.5 && pFade > 0.01 && pNV > 0.02) {
+            float depthYards = cHdPom.y * pFade;
+            float nv = max(pNV, 0.12);
+            float3 e = -(pV - pN * pNV) / nv;
+            float2 D0 = PomShift(e, pDx, pDy, d0x, d0y);
+            float2 D1 = PomShift(e, pDx, pDy, d1x, d1y);
+            float2 D2 = PomShift(e, pDx, pDy, d2x, d2y);
+            float2 D3 = PomShift(e, pDx, pDy, d3x, d3y);
+            float steps = clamp(cHdPom.z, 4.0, 16.0);
+            float dt = 1.0 / steps;
+            float tPrev = 0.0;
+            float dPrev = 1.0 - PomH(pU0, pU1, pU2, pU3, pW, pLod);
+            float tHit = 1.0;
+            float found = 0.0;
+            [unroll] for (int i = 1; i <= 16; i++) {
+                [branch] if (found < 0.5 && float(i) <= steps) {
+                    float t = float(i) * dt;
+                    float d = t * depthYards;
+                    float dCur = (1.0 - PomH(pU0 + D0 * d, pU1 + D1 * d, pU2 + D2 * d, pU3 + D3 * d, pW, pLod)) - t;
+                    [branch] if (dCur <= 0.0) {
+                        tHit = tPrev + (t - tPrev) * (dPrev / max(dPrev - dCur, 1.0e-5));
+                        found = 1.0;
+                    }
+                    tPrev = t;
+                    dPrev = dCur;
+                }
+            }
+            float dHit = tHit * depthYards;
+            pomS0 = D0 * dHit;
+            pomS1 = D1 * dHit;
+            pomS2 = D2 * dHit;
+            pomS3 = D3 * dHit;
+
+            // soft self-shadow: four taps from the hit point up the sun's ray
+            float3 pS = cHdPom2.xyz;
+            float nL = dot(pN, pS);
+            [branch] if (cHdPom2.w > 0.0 && nL > 0.08 && tHit > 0.02) {
+                float3 eL = (pS - pN * nL) / nL;
+                float2 L0 = PomShift(eL, pDx, pDy, d0x, d0y);
+                float2 L1 = PomShift(eL, pDx, pDy, d1x, d1y);
+                float2 L2 = PomShift(eL, pDx, pDy, d2x, d2y);
+                float2 L3 = PomShift(eL, pDx, pDy, d3x, d3y);
+                float occ = 0.0;
+                [unroll] for (int j = 1; j <= 4; j++) {
+                    float fr = float(j) * 0.25;
+                    float r = fr * dHit;
+                    float tRay = tHit * (1.0 - fr);
+                    float hs = PomH(pU0 + pomS0 + L0 * r, pU1 + pomS1 + L1 * r, pU2 + pomS2 + L2 * r, pU3 + pomS3 + L3 * r, pW, pLod);
+                    occ = max(occ, saturate((tRay - (1.0 - hs)) * 8.0));
+                }
+                pomShadow = 1.0 - occ * cHdPom2.w * pFade;
+            }
+        }
+    }
+#endif
+
+    // ---- layer textures
+#if ENV_LAYER0
+    float4 t0 = texCUBE(sLayer0, iTex0.xyz);
+#else
+    float4 t0 = tex2D(sLayer0, iTex0.xy + pomS0);
+#endif
+#if LAYERS >= 2
+    float4 t1 = tex2D(sLayer1, uv1 + pomS1);
+#endif
+#if LAYERS >= 3
+    float4 t2 = tex2D(sLayer2, uv2 + pomS2);
+#endif
+#if LAYERS >= 4
+    float4 t3 = tex2D(sLayer3, uv3 + pomS3);
 #endif
 
     // ---- shadow term S (1 = lit)
@@ -544,6 +713,8 @@ void main(
         }
     }
 #endif
+
+    S = S * pomShadow;
 
     // ---- HD lights: Forever's light buffer for this pixel
     float3 buffer = float3(0.0, 0.0, 0.0);
@@ -645,6 +816,12 @@ void main(
     CVar* s_hemi = nullptr;
     CVar* s_ambient = nullptr;
     CVar* s_info = nullptr;
+    CVar* s_pom = nullptr;
+    CVar* s_pomDepth = nullptr;
+    CVar* s_pomSamples = nullptr;
+    CVar* s_pomDistance = nullptr;
+    CVar* s_pomShadow = nullptr;
+    float s_sunToLight[3] = { 0.0f, 0.0f, 0.0f };  // world direction to the sun (0 = none), set per frame by the chunk renderer
 
     float Clamp(float v, float lo, float hi) {
         return v < lo ? lo : (v > hi ? hi : v);
@@ -857,6 +1034,11 @@ void HD::RegisterTerrainCVars() {
     s_light = OptionCVars::Register("hdTerrainLight", "HD: 1 = WoW Forever terrain lighting, 2 = our shaders with 3.3.5 lighting, 3 = test view (sun after shadow only), 0 = Blizzard shaders", "1");
     s_ambient = OptionCVars::Register("hdLightAmbient", "HD: ambient strength on the ground in Forever lighting, 1 = Forever's (test only)", "1");
     s_hemi = OptionCVars::Register("hdTerrainHemi", "HD test: 1 = Forever hemisphere ambient, 0 = none (horizon = ground = sky), 2 = ratios frozen", "1");
+    s_pom = OptionCVars::Register("terrainPOM", "HD: terrain parallax occlusion mapping, 0 = off, 1 = on", "1");
+    s_pomDepth = OptionCVars::Register("terrainPOMDepth", "HD: terrain parallax depth, in 8-yard texture tiles (0.045 = about 0.36 yards)", "0.045");
+    s_pomSamples = OptionCVars::Register("terrainPOMSamples", "HD: terrain parallax ray steps at most, 4..16", "16");
+    s_pomDistance = OptionCVars::Register("terrainPOMDistance", "HD: terrain parallax fades out over the last third of this distance, yards", "85");
+    s_pomShadow = OptionCVars::Register("terrainPOMShadow", "HD: strength 0..1 of the relief's self-shadow from the sun", "0.6");
     s_info = CVar::Register("hdTerrainInfo", "HD: hdTerrainLight status (read only)", 0, "not started", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
 }
 
@@ -954,6 +1136,25 @@ void HD::TerrainVertexConstants(const CAaSphere* sphere, CM2Scene* scene, const 
     pixel[2] = static_cast<float>(count);
     pixel[3] = perPixel && lights == 3 ? 1.0f : 0.0f;
     g_theGxDevicePtr->ShaderConstantsSet(GxSh_Pixel, 16, pixel, 1 + 4 * count);
+
+    // pixel c33, c34: parallax occlusion mapping (c16 + 1 + 4 * 4 = c33 is the first register after the lights)
+    float pom[8];
+    bool on = OptionCVars::Bool(s_pom, true) && Visuals::Current() == Visuals::AzerothRemastered;
+    pom[0] = on ? 1.0f : 0.0f;
+    pom[1] = OptionCVars::Float(s_pomDepth, 0.0f, 0.5f, 0.045f) * 8.0f;
+    pom[2] = OptionCVars::Float(s_pomSamples, 4.0f, 16.0f, 16.0f);
+    pom[3] = OptionCVars::Float(s_pomDistance, 5.0f, 1000.0f, 85.0f);
+    pom[4] = s_sunToLight[0];
+    pom[5] = s_sunToLight[1];
+    pom[6] = s_sunToLight[2];
+    pom[7] = OptionCVars::Float(s_pomShadow, 0.0f, 1.0f, 0.6f);
+    g_theGxDevicePtr->ShaderConstantsSet(GxSh_Pixel, 33, pom, 2);
+}
+
+void HD::TerrainSunDirection(float x, float y, float z) {
+    s_sunToLight[0] = x;
+    s_sunToLight[1] = y;
+    s_sunToLight[2] = z;
 }
 
 void HD::TerrainHemisphere(float* horizon, float* ground) {

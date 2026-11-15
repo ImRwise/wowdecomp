@@ -55,6 +55,12 @@ namespace {
     CVar* s_threshold = nullptr;
     CVar* s_rays = nullptr;
     CVar* s_rayStrength = nullptr;
+    // The other names for the same settings (sunShafts, sunShaftsIntensity, hdrBloom, hdrBloomIntensity): an effect is on only when
+    // both its names are on, and the strengths multiply (each name's default intensity counts as 1), so either name works.
+    CVar* s_aliasRays = nullptr;
+    CVar* s_aliasRayStrength = nullptr;
+    CVar* s_aliasBloom = nullptr;
+    CVar* s_aliasBloomStrength = nullptr;
     CVar* s_debug = nullptr;
     CVar* s_info = nullptr;
     char s_lastInfo[256] = {};
@@ -227,14 +233,18 @@ void HD::Bloom::RegisterCVars() {
     s_threshold = OptionCVars::Register("hdBloomThreshold", "HD: bright threshold 0..1", "0.7");
     s_rays = OptionCVars::Register("hdRays", "HD: sun rays", "1");
     s_rayStrength = OptionCVars::Register("hdRaysStrength", "HD: rays strength 0..5", "1");
+    s_aliasBloom = OptionCVars::Register("hdrBloom", "HD: bloom on/off (same as hdBloom; both must be on)", "1");
+    s_aliasBloomStrength = OptionCVars::Register("hdrBloomIntensity", "HD: bloom intensity, default 0.45 (multiplies hdBloomStrength)", "0.45");
+    s_aliasRays = OptionCVars::Register("sunShafts", "HD: sun shafts on/off (same as hdRays; both must be on)", "1");
+    s_aliasRayStrength = OptionCVars::Register("sunShaftsIntensity", "HD: sun shafts intensity, default 0.65 (multiplies hdRaysStrength)", "0.65");
     s_debug = CVar::Register("hdBloomDebug", "HD: 1 mask, 2 rays, 3 halo", 0, "0", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_info = CVar::Register("hdBloomInfo", "HD: bloom status", 0, "off", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
 }
 
 void HD::Bloom::World() {
     const HD::Camera& camera = HD::CurrentCamera();
-    const bool bloom = OptionCVars::Bool(s_bloom, false);
-    bool rays = OptionCVars::Bool(s_rays, false);
+    const bool bloom = OptionCVars::Bool(s_bloom, false) && OptionCVars::Bool(s_aliasBloom, true);
+    bool rays = OptionCVars::Bool(s_rays, false) && OptionCVars::Bool(s_aliasRays, true);
     if (Visuals::Current() != Visuals::AzerothRemastered || (!bloom && !rays)) {
         Info("off");
         return;
@@ -251,9 +261,9 @@ void HD::Bloom::World() {
         return;
     }
     State& st = s_state;
-    const float strength = OptionCVars::Float(s_strength, 0.0f, 5.0f, 1.0f);
+    const float strength = OptionCVars::Float(s_strength, 0.0f, 5.0f, 1.0f) * OptionCVars::Float(s_aliasBloomStrength, 0.0f, 5.0f, 0.45f) / 0.45f;
     const float threshold = OptionCVars::Float(s_threshold, 0.0f, 1.0f, 0.7f);
-    const float rayStrength = OptionCVars::Float(s_rayStrength, 0.0f, 5.0f, 1.0f);
+    const float rayStrength = OptionCVars::Float(s_rayStrength, 0.0f, 5.0f, 1.0f) * OptionCVars::Float(s_aliasRayStrength, 0.0f, 5.0f, 0.65f) / 0.65f;
     const int32_t debug = OptionCVars::Int(s_debug, 0, 3, 0);
 
     const DayNight::DNInfo& dn = DayNight::g_dnInfo;

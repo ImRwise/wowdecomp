@@ -2014,7 +2014,9 @@ void CMapRenderChunk::InitializeVertexShaderConstants(const C44Matrix& world, co
         consts.m_sunDir.z = dir.z;
         consts.m_sunDir.w = 1.0f;
         consts.m_sunSpecularW = 20.0f;
+        HD::TerrainSunDirection(-sunDir.x, -sunDir.y, -sunDir.z);
     } else {
+        HD::TerrainSunDirection(0.0f, 0.0f, 0.0f);
         consts.m_sunAmbient = C3Vector(1.0f, 1.0f, 1.0f);
         consts.m_sunAmbientW = 1.0f;
         consts.m_sunSpecular = C3Vector(0.0f, 0.0f, 0.0f);

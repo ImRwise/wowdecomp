@@ -14,47 +14,25 @@ that provides `GxEffects`: **only Vulkan does today** (see [Status](#status)).
 Vulkan only draws the world with the real shaders when `VulkanShaders\manifest.txt` sits beside the exe (made by
 `Tools/VulkanShaders/translate_shaders.py`, see that README); without it the world falls back to fixed-function.
 
-## Terrain parallax occlusion mapping (`HdTerrain`)
+## Terrain and shafts: removed
 
-Ray-marches the terrain's layer textures against a smooth height field (their luminance at a blurred mip, so grain such as
-sand does not become spikes, blended with the layers' own alpha weights). The relief is weighted by how structured the
-surface is: stones, bricks and cracks get depth, sand and grass stay flat. The height field's slope, read at full texture resolution, also gives a normal for
-the sun's shading and a glint on edges, crevices get a soft occlusion (never below 0.68), and there is a gentle self-shadow toward
-the sun that never darkens the sun light below 76%. The tangent frame comes from screen derivatives, so no
-ADT change is needed. It runs in our terrain shaders: with `visuals 2` as `hdTerrainLight` says (1 Forever lighting, 2 and 3 as
-described in `HdTerrain.h`, 0 Blizzard's shaders and so no parallax), and with `visuals 1` (Lumenveil, the default) whenever
-`terrainPOM` is on, then with 3.3.5's own lighting. `visuals 0` (stock) draws nothing extra.
+Terrain parallax occlusion mapping and the HdRays / `sunShafts` radial pass were tried and taken out again (they distorted the
+terrain textures and smeared foliage colour across the screen). `HdTerrain` is back to its lighting-only shaders (`hdTerrainLight`),
+and `terrainPOM*`, `hdRays*` and `sunShafts*` no longer exist. Lumenveil's own shafts are separate: `lvShafts 0` turns them off.
+
+## Bloom and grade
+
+`hdrBloom` is another name for `hdBloom`; use either (both must be on, and the strengths multiply, each name's default counting as 1).
 
 | CVar | Default | Meaning |
 | --- | --- | --- |
-| `terrainPOM` | `1` | 0 off, 1 on |
-| `terrainPOMDepth` | `0.042` | depth in 8-yard texture tiles (0.042 is about 0.34 yards) |
-| `terrainPOMSamples` | `20` | ray steps at most, 4..24 |
-| `terrainPOMFadeStart` | `25` | yards; the effect starts to fade here |
-| `terrainPOMDistance` | `55` | yards; the effect is gone here, nothing is done beyond |
-| `terrainPOMShadow` | `0.24` | 0..0.3, how much the relief's self-shadow darkens the sun light (0.24 = never below 76%) |
+| `hdBloom` / `hdrBloom` | `1` | on/off |
+| `hdBloomStrength` | `0.5` | halo strength 0..5 |
+| `hdrBloomIntensity` | `0.45` | multiplies `hdBloomStrength` (0.45 counts as 1) |
+| `hdBloomThreshold` | `0.92` | 0..1.5, on luma: only near-white pixels glow, saturated ground never does (the picture tops out at 1, so above it only the soft knee blooms) |
+| `hdGradeStrength` | `0.5` | colour grading strength 0..2 |
 
-Example: `/console terrainPOMDepth 0.04` for deeper cobbles, `/console terrainPOMSamples 8` to save fill rate.
-
-**Vulkan:** the terrain pixel shaders need translated modules. After changing `HdTerrain.cpp`'s HLSL, start the game once (it
-writes the missing code to `VulkanShaders\hd-pending`), then run `python Tools/HdMaterials/install_hd_shaders.py --client "<client>"`
-and restart. The tool only adds or replaces its own records in `manifest.txt` (the stock and other HD modules stay) and needs glslang
-at `build/tools/glslang/bin/glslang.exe` (the Khronos `main-tot` Windows release). Until then Vulkan keeps Blizzard's terrain shaders.
-D3D11 compiles them directly.
-
-## Sun shafts and bloom
-
-`sunShafts` / `hdrBloom` are other names for the existing `hdRays` / `hdBloom`; use either. An effect is on only when
-both of its names are on, and the strengths multiply, with each name's own default counting as 1.
-
-| CVar | Default | Same as |
-| --- | --- | --- |
-| `sunShafts` | `1` | `hdRays` |
-| `sunShaftsIntensity` | `0.65` | `hdRaysStrength` (default 1) |
-| `hdrBloom` | `1` | `hdBloom` |
-| `hdrBloomIntensity` | `0.45` | `hdBloomStrength` (default 1) |
-
-`hdBloomThreshold` (0..1.5, default 0.92, measured on luma so saturated ground does not glow; the picture tops out at 1, so above it only the soft knee blooms) sets how bright a pixel must be to glow; defaults `hdBloomStrength` 0.6, `hdRaysStrength` 0.5. The ray mask takes only unoccluded sky in a tight cone round the sun and tints the shafts with the sun's colour (gold low, pale warm overhead), never the sky's or the foliage's hue; Lumenveil's own shafts carry the sky's brightness only; `hdBloomDebug` 1 mask, 2 rays, 3 halo.
+Only with `visuals 2`.
 
 ## D3D11 effects
 
@@ -69,7 +47,7 @@ effect textures can be unordered-access targets, and `GxEffects::SetDrawTexture`
 
 ## Status
 
-- Done: terrain POM (luminance height), aliases above, D3D11 `GxEffects` (builds; **not yet run in game**: the first test on D3D11
+- Done: bloom tuning, D3D11 `GxEffects` (builds; **not yet run in game**: the first test on D3D11
   may show problems in the passes, `Logs\d3d11.log` lines starting `GxEffects:` say what failed).
 - Offline check: all 71 effect programs convert to HLSL and compile for SM5.
 - Not done yet: MSAA in the Vulkan backend (it renders at one sample; the effects sample the scene mid-frame, so a resolve

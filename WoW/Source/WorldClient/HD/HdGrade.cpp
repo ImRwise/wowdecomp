@@ -266,7 +266,7 @@ void HD::Grade::RegisterCVars() {
     if (s_enabled) return;
     HD::RegisterForeverCVars();
     s_enabled = OptionCVars::Register("hdGrade", "HD: colour grading, 0 off / 1 on", "1");
-    s_strength = OptionCVars::Register("hdGradeStrength", "HD: grading strength 0..2", "0.6");
+    s_strength = OptionCVars::Register("hdGradeStrength", "HD: grading strength 0..2", "0.5");
     s_debug = CVar::Register("hdGradeDebug", "HD: left original / right graded", 0, "0", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_forced = OptionCVars::Register("hdGradeLut", "HD: positive LUT ID overrides zone choice", "0");
     s_info = CVar::Register("hdGradeInfo", "HD: grading status", 0, "off", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
@@ -295,7 +295,7 @@ void HD::Grade::World() {
     const Selection selected = Select(weights);
     float params[4] = {};
     params[0] = Clamp(selected.blend, 0.0f, 1.0f);
-    params[1] = Clamp(OptionCVars::Float(s_strength, 0.0f, 2.0f, 0.6f), 0.0f, 2.0f);
+    params[1] = Clamp(OptionCVars::Float(s_strength, 0.0f, 2.0f, 0.5f), 0.0f, 2.0f);
     params[2] = OptionCVars::Bool(s_debug, false) ? 1.0f : 0.0f;
     if (!selected.hasGrade && params[2] <= 0.5f) {
         Info("grade: no grading for this light");

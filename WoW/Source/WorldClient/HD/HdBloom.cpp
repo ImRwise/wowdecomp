@@ -31,7 +31,6 @@ namespace {
         float a[4];
         float b[4];
         float c[4];
-        float d[4];   // the sun's light colour, for the ray mask
     };
 
     // Where the sun is on screen and how to tell the sky in the depth copy.
@@ -54,12 +53,8 @@ namespace {
     CVar* s_bloom = nullptr;
     CVar* s_strength = nullptr;
     CVar* s_threshold = nullptr;
-    CVar* s_rays = nullptr;
-    CVar* s_rayStrength = nullptr;
     // The other names for the same settings (sunShafts, sunShaftsIntensity, hdrBloom, hdrBloomIntensity): an effect is on only when
     // both its names are on, and the strengths multiply (each name's default intensity counts as 1), so either name works.
-    CVar* s_aliasRays = nullptr;
-    CVar* s_aliasRayStrength = nullptr;
     CVar* s_aliasBloom = nullptr;
     CVar* s_aliasBloomStrength = nullptr;
     CVar* s_debug = nullptr;
@@ -230,14 +225,10 @@ namespace {
 void HD::Bloom::RegisterCVars() {
     if (s_bloom) return;
     s_bloom = OptionCVars::Register("hdBloom", "HD: bright world halos", "1");
-    s_strength = OptionCVars::Register("hdBloomStrength", "HD: halo strength 0..5", "0.6");
+    s_strength = OptionCVars::Register("hdBloomStrength", "HD: halo strength 0..5", "0.5");
     s_threshold = OptionCVars::Register("hdBloomThreshold", "HD: bright threshold of luma (0..1.5; the picture tops out at 1, so above it only the knee blooms)", "0.92");
-    s_rays = OptionCVars::Register("hdRays", "HD: sun rays", "1");
-    s_rayStrength = OptionCVars::Register("hdRaysStrength", "HD: rays strength 0..5", "0.5");
     s_aliasBloom = OptionCVars::Register("hdrBloom", "HD: bloom on/off (same as hdBloom; both must be on)", "1");
     s_aliasBloomStrength = OptionCVars::Register("hdrBloomIntensity", "HD: bloom intensity, default 0.45 (multiplies hdBloomStrength)", "0.45");
-    s_aliasRays = OptionCVars::Register("sunShafts", "HD: sun shafts on/off (same as hdRays; both must be on)", "1");
-    s_aliasRayStrength = OptionCVars::Register("sunShaftsIntensity", "HD: sun shafts intensity, default 0.65 (multiplies hdRaysStrength)", "0.65");
     s_debug = CVar::Register("hdBloomDebug", "HD: 1 mask, 2 rays, 3 halo", 0, "0", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
     s_info = CVar::Register("hdBloomInfo", "HD: bloom status", 0, "off", nullptr, CATEGORY_GRAPHICS, false, nullptr, false);
 }
@@ -245,8 +236,7 @@ void HD::Bloom::RegisterCVars() {
 void HD::Bloom::World() {
     const HD::Camera& camera = HD::CurrentCamera();
     const bool bloom = OptionCVars::Bool(s_bloom, false) && OptionCVars::Bool(s_aliasBloom, true);
-    bool rays = OptionCVars::Bool(s_rays, false) && OptionCVars::Bool(s_aliasRays, true);
-    if (Visuals::Current() != Visuals::AzerothRemastered || (!bloom && !rays)) {
+    if (Visuals::Current() != Visuals::AzerothRemastered || !bloom) {
         Info("off");
         return;
     }
@@ -262,26 +252,9 @@ void HD::Bloom::World() {
         return;
     }
     State& st = s_state;
-    const float strength = OptionCVars::Float(s_strength, 0.0f, 5.0f, 0.6f) * OptionCVars::Float(s_aliasBloomStrength, 0.0f, 5.0f, 0.45f) / 0.45f;
+    const float strength = OptionCVars::Float(s_strength, 0.0f, 5.0f, 0.5f) * OptionCVars::Float(s_aliasBloomStrength, 0.0f, 5.0f, 0.45f) / 0.45f;
     const float threshold = OptionCVars::Float(s_threshold, 0.0f, 1.5f, 0.92f);
-    const float rayStrength = OptionCVars::Float(s_rayStrength, 0.0f, 5.0f, 0.5f) * OptionCVars::Float(s_aliasRayStrength, 0.0f, 5.0f, 0.65f) / 0.65f;
     const int32_t debug = OptionCVars::Int(s_debug, 0, 3, 0);
-
-    const DayNight::DNInfo& dn = DayNight::g_dnInfo;
-    const C3Vector sunPos = DayNight::g_planets.m_sun.m_position;
-    const float sun[3] = { sunPos.x - dn.m_cameraPos.x, sunPos.y - dn.m_cameraPos.y, sunPos.z - dn.m_cameraPos.z };
-    const float forward[3] = { dn.m_cameraDir.x, dn.m_cameraDir.y, dn.m_cameraDir.z };
-    Post post;
-    const bool havePost = BuildPost(camera, width, height, sun, forward, dn.m_farClip > 50 ? dn.m_farClip : 1000, post);
-    rays = rays && havePost && (post.visible > .001f || debug > 0);
-    if (rays && !st.depth) {
-        st.depth = device->CreateTexture(width, height, GxEffects::Format::Depth, false);
-    }
-    rays = rays && st.depth && device->CopyDepth(st.depth);
-    if (!bloom && !rays) {
-        Info("bloom skipped: rays need the scene depth and a visible sun");
-        return;
-    }
 
     Push c = {};
     bool ok = device->CopyColor(st.images[0]);
@@ -292,30 +265,16 @@ void HD::Bloom::World() {
         Set(c.a, 1.0f / Dimension(width, 4), 1.0f / Dimension(height, 4));
         ok = ok && Run(Down, 3, st.images[1], st.images[1], st.images[1], c) && BlurImage(3, 1, c) && BlurImage(3, 2, c);
     }
-    if (ok && rays) {
-        // the sun's light: deep gold when it is low, a pale warm white overhead (the moon's silver-blue is Lumenveil's)
-        const float sunLen = std::sqrt(sun[0] * sun[0] + sun[1] * sun[1] + sun[2] * sun[2]);
-        const float high = Sat(sunLen > 1e-3f ? sun[2] / sunLen * 2.0f : 0.5f);
-        Set(c.d, 1.0f + (1.0f - 1.0f) * high, 0.62f + (0.90f - 0.62f) * high, 0.30f + (0.70f - 0.30f) * high);
-        Set(c.a, post.u, post.v, float(width) / height, .35f);
-        Set(c.b, .5f, post.farClip);
-        Set(c.c, post.minDepth, post.maxDepth, post.c2, post.d2);
-        ok = Run(RayMask, 5, st.images[0], st.depth, st.images[0], c, true);
-        Set(c.a, post.u, post.v, .9f, .97f);
-        Set(c.b, 1.0f);
-        ok = ok && Run(Radial, 6, st.images[5], st.images[5], st.images[5], c);
-    }
     const uint32_t halo = bloom ? 1 : 6;
     const uint32_t wide = bloom ? 3 : 6;
-    const uint32_t ray = rays ? (debug == 1 ? 5 : 6) : halo;
-    Set(c.a, bloom ? strength : 0, rays ? rayStrength * (debug > 0 ? 1 : post.visible) : 0, float(debug));
-    Set(c.b, post.u, post.v, float(width) / height);
+    const uint32_t ray = halo;   // the composite's rays input: unused, its strength is 0
+    Set(c.a, strength, 0, float(debug));
+    Set(c.b, 0, 0, float(width) / height);
     st.frame = ok ? HD::Frame::Open(width, height) : nullptr;
     ok = st.frame && Run(Composite, -1, st.images[halo], st.images[wide], st.images[ray], c);
     if (!ok) {
         Info("bloom: a copy or a compute failed");
         return;
     }
-    Info(s_rays && s_rays->m_intValue && !rays ? "bloom; rays unavailable (depth, projection or sun)"
-                                               : (rays ? (bloom ? "bloom + rays: original formulas" : "rays: original formulas") : "bloom: original formulas"));
+    Info("bloom: original formulas");
 }

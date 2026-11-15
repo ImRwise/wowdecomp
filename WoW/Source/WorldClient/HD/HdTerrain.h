@@ -19,8 +19,6 @@ class CM2Scene;
 //                  3 = test view (only the sun after the shadow), 0 = Blizzard's shaders
 //   hdLightAmbient ambient strength in Forever lighting (1 = Forever's; a test knob)
 //   hdTerrainHemi  test: 1 Forever hemisphere, 0 none (horizon = ground = sky), 2 ratios frozen
-//   terrainPOM 0/1 (1), terrainPOMDepth (0.045, texture tiles of 8 yards), terrainPOMSamples (16), terrainPOMDistance (85 yards),
-//                  terrainPOMShadow (0.6): parallax occlusion mapping, luminance height, Forever lighting shaders only
 //   hdTerrainInfo  status: /run print(GetCVar("hdTerrainInfo"))
 namespace HD {
 
@@ -31,8 +29,6 @@ enum TerrainShaderKind {
 };
 
 void RegisterTerrainCVars();
-// The world direction to the sun (0, 0, 0 when the zone has none), for the parallax self-shadow; every frame the chunk renderer sets its constants.
-void TerrainSunDirection(float x, float y, float z);
 // Starts compiling our terrain shaders on a background thread (once; from CMap::Initialize).
 void TerrainShadersStart();
 // Where the client picks a terrain shader: gives it our code or Blizzard's, to match hdTerrainLight and visuals.
